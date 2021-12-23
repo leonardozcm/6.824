@@ -6,13 +6,17 @@ package main
 // go run mrsequential.go wc.so pg*.txt
 //
 
-import "fmt"
-import "../mr"
-import "plugin"
-import "os"
-import "log"
-import "io/ioutil"
-import "sort"
+import (
+	"fmt"
+	"io/ioutil"
+	"log"
+	"os"
+	"plugin"
+	"sort"
+	"strconv"
+
+	"../mr"
+)
 
 // for sorting by key.
 type ByKey []mr.KeyValue
@@ -66,8 +70,10 @@ func main() {
 	// and print the result to mr-out-0.
 	//
 	i := 0
+	start := 0
 	for i < len(intermediate) {
 		j := i + 1
+		start = j
 		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
 			j++
 		}
@@ -76,6 +82,10 @@ func main() {
 			values = append(values, intermediate[k].Value)
 		}
 		output := reducef(intermediate[i].Key, values)
+
+		if output_i, _ := strconv.Atoi(output); j-start+1 != output_i {
+			fmt.Printf("index j increase %d, output is %s\n", j-start, output)
+		}
 
 		// this is the correct format for each line of Reduce output.
 		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)

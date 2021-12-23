@@ -1,15 +1,29 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"errors"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+)
 
 type Master struct {
 	// Your definitions here.
+	NReduce         int
+	inputsPending   []string // not delivered
+	inputsDelivered []string // delivered
+	workerStatuses  []*WorkerStatus
+	mutex           sync.RWMutex
+}
 
+// keep the records of every worker
+type WorkerStatus struct {
+	isIdle     bool
+	mapFile    string // for map stage
+	reducePart int    // for reduce -1 for unset status
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -24,6 +38,40 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+// register a worker before map starts
+func (m *Master) RegisterWorker(args *ExampleArgs, idx *int) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.workerStatuses = append(m.workerStatuses, &WorkerStatus{
+		isIdle:     true,
+		mapFile:    "",
+		reducePart: -1,
+	})
+	*idx = len(m.workerStatuses) - 1
+
+	return nil
+
+}
+
+func (m *Master) ApplyForTask(idx int, path *string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if len(m.inputsPending) == 0 {
+		path = nil
+		return errors.New("there is no task pending")
+	}
+	*path = m.inputsPending[0]
+	m.workerStatuses[idx].isIdle = false
+	m.workerStatuses[idx].mapFile = *path
+
+	m.inputsDelivered = append(m.inputsDelivered, *path)
+
+	// dequeue at last is more safe
+	m.inputsPending = m.inputsPending[1:]
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,20 +98,23 @@ func (m *Master) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
 //
 // create a Master.
 // main/mrmaster.go calls this function.
-// nReduce is the number of reduce tasks to use.
+// nReduce is the number of reduce tasks to use, not map tasks
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{NReduce: nReduce,
+		inputsPending:   files,
+		inputsDelivered: []string{},
+		workerStatuses:  []*WorkerStatus{},
+		mutex:           sync.RWMutex{}}
 
 	// Your code here.
-
+	// split files into nReduce pieces
 
 	m.server()
 	return &m
