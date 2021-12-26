@@ -1,7 +1,7 @@
 package mr
 
 import (
-	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -12,18 +12,44 @@ import (
 
 type Master struct {
 	// Your definitions here.
+	NMap            int
 	NReduce         int
-	inputsPending   []string // not delivered
-	inputsDelivered []string // delivered
-	workerStatuses  []*WorkerStatus
-	mutex           sync.RWMutex
+	workers         int
+	inputsPending   []*InterMediateFilePair       // not delivered [filepath]
+	inputsDelivered map[int]*InterMediateFilePair // delivered {workerid:filepath}
+
+	reduceptr       int
+	reducePending   map[int][]*InterMediateFilePair //  map[Y]:[{X, filePath(mr-X-Y)}]
+	reduceDelivered map[int]int                     // map[Y]:workerid
+
+	outputFiles []string // [outputfiles(mr-output-Y)]
+
+	workerStatuses []*WorkerStatus
+	mutex          sync.Mutex
 }
 
 // keep the records of every worker
+type WorkerStage int
+
+const (
+	Mapping WorkerStage = iota
+	Reducing
+)
+
 type WorkerStatus struct {
-	isIdle     bool
-	mapFile    string // for map stage
-	reducePart int    // for reduce -1 for unset status
+	isIdle         bool
+	workerStage    WorkerStage
+	takeCareTaskID int                     // for map/reduce stage, -1 for unset status
+	takeCareFiles  []*InterMediateFilePair // for map/reduce stage, [] for unset status
+}
+
+func resetWS(ws WorkerStage) *WorkerStatus {
+	return &WorkerStatus{
+		isIdle:         true,
+		workerStage:    ws,
+		takeCareTaskID: -1,
+		takeCareFiles:  []*InterMediateFilePair{},
+	}
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -33,43 +59,183 @@ type WorkerStatus struct {
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
 
 // register a worker before map starts
-func (m *Master) RegisterWorker(args *ExampleArgs, idx *int) error {
+func (m *Master) RegisterWorker(req EmptyArgs, reply *MasterReplyArgs) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	m.workerStatuses = append(m.workerStatuses, &WorkerStatus{
-		isIdle:     true,
-		mapFile:    "",
-		reducePart: -1,
-	})
-	*idx = len(m.workerStatuses) - 1
+	fmt.Println("empty req:", req.Msg)
+
+	m.workerStatuses = append(m.workerStatuses, resetWS(Mapping))
+	m.workers += 1
+	*reply = MasterReplyArgs{
+		WorkerID:     len(m.workerStatuses) - 1,
+		Command:      WAIT,
+		ProcessFiles: []*InterMediateFilePair{},
+		TaskId:       -1,
+		NReduce:      m.NReduce,
+	}
 
 	return nil
-
 }
 
-func (m *Master) ApplyForTask(idx int, path *string) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
+func (m *Master) OnApplyForMapTask(req *WorkerRequestArgs, reply *MasterReplyArgs) error {
+	// m.mutex.Lock()
+	// defer m.mutex.Unlock()
 
+	idx := req.WorkerID
+	log.Println("Master OnApplyForMapTask:", len(m.inputsPending), " ", len(m.inputsDelivered))
 	if len(m.inputsPending) == 0 {
-		path = nil
-		return errors.New("there is no task pending")
-	}
-	*path = m.inputsPending[0]
-	m.workerStatuses[idx].isIdle = false
-	m.workerStatuses[idx].mapFile = *path
+		// All map tasks are Done
+		if len(m.inputsDelivered) == 0 {
+			m.workerStatuses[idx] = resetWS(Reducing)
+			*reply = MasterReplyArgs{
+				WorkerID:     idx,
+				Command:      REDUCE,
+				ProcessFiles: []*InterMediateFilePair{},
+				TaskId:       -1,
+			}
+			return nil
+		}
 
-	m.inputsDelivered = append(m.inputsDelivered, *path)
+		// Wait for other Map nodes Done
+		m.workerStatuses[idx] = resetWS(Mapping)
+		*reply = MasterReplyArgs{
+			WorkerID:     idx,
+			Command:      WAIT,
+			ProcessFiles: []*InterMediateFilePair{},
+			TaskId:       -1,
+		}
+		return nil
+	}
+	imFile := m.inputsPending[0] // dequene
+
+	m.workerStatuses[idx] = &WorkerStatus{
+		isIdle:         false,
+		workerStage:    Mapping,
+		takeCareTaskID: imFile.X,
+		takeCareFiles: []*InterMediateFilePair{
+			imFile,
+		},
+	}
+
+	m.inputsDelivered[imFile.X] = imFile
+
+	log.Println("OnApplyForMapTask Before send reply:", reply)
+	*reply = MasterReplyArgs{
+		WorkerID:     idx,
+		TaskId:       imFile.X,
+		NReduce:      m.NReduce,
+		Command:      MAP,
+		ProcessFiles: []*InterMediateFilePair{imFile},
+	}
+	log.Println("OnApplyForMapTask After send reply:", reply)
 
 	// dequeue at last is more safe
 	m.inputsPending = m.inputsPending[1:]
+	return nil
+}
+
+func (m *Master) OnMapWorkersDone(req *WorkerRequestArgs, reply *MasterReplyArgs) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	idx := req.WorkerID
+	ws := m.workerStatuses[idx]
+	delete(m.inputsDelivered, ws.takeCareTaskID)
+
+	for _, output := range req.Outputs {
+		m.reducePending[output.Y] = append(m.reducePending[output.Y], output)
+	}
+
+	m.workerStatuses[idx] = resetWS(Mapping)
+	*reply = MasterReplyArgs{
+		WorkerID:     idx,
+		Command:      WAIT,
+		ProcessFiles: []*InterMediateFilePair{},
+		TaskId:       -1,
+		NReduce:      m.NReduce,
+	}
+	return nil
+}
+
+func (m *Master) OnApplyForReduceTask(req *WorkerRequestArgs, reply *MasterReplyArgs) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	idx := req.WorkerID
+	if len(m.reducePending) == 0 {
+		// ALL Reduce tasks are Done
+		if len(m.reduceDelivered) == 0 {
+			m.workerStatuses[idx] = resetWS(Reducing)
+			*reply = MasterReplyArgs{
+				WorkerID:     idx,
+				Command:      EXIT,
+				ProcessFiles: []*InterMediateFilePair{},
+				TaskId:       -1,
+			}
+			m.workers -= 1
+			return nil
+		}
+
+		// Wait for other Map nodes Done
+		m.workerStatuses[idx] = resetWS(Reducing)
+		*reply = MasterReplyArgs{
+			WorkerID:     idx,
+			Command:      WAIT,
+			ProcessFiles: []*InterMediateFilePair{},
+			TaskId:       -1,
+		}
+	}
+
+	imFiles := m.reducePending[m.reduceptr] // dequene
+
+	m.workerStatuses[idx] = &WorkerStatus{
+		isIdle:         false,
+		workerStage:    Reducing,
+		takeCareTaskID: m.reduceptr,
+		takeCareFiles:  imFiles,
+	}
+
+	m.reduceDelivered[m.reduceptr] = idx
+
+	log.Println("OnApplyForReduceTask Before send reply:", reply)
+	*reply = MasterReplyArgs{
+		WorkerID:     idx,
+		TaskId:       m.reduceptr,
+		NReduce:      m.NReduce,
+		Command:      REDUCE,
+		ProcessFiles: imFiles,
+	}
+	log.Println("OnApplyForReduceTask After send reply:", reply)
+
+	// dequeue at last is more safe
+	delete(m.reducePending, m.reduceptr)
+	m.reduceptr += 1
+	return nil
+}
+
+func (m *Master) OnReduceWorkersDone(req *WorkerRequestArgs, reply *MasterReplyArgs) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	idx := req.WorkerID
+	ws := m.workerStatuses[idx]
+	delete(m.reduceDelivered, ws.takeCareTaskID)
+
+	for _, output := range req.Outputs {
+		m.outputFiles = append(m.outputFiles, output.FilePath)
+	}
+
+	m.workerStatuses[idx] = resetWS(Reducing)
+	*reply = MasterReplyArgs{
+		WorkerID:     idx,
+		Command:      WAIT,
+		ProcessFiles: []*InterMediateFilePair{},
+		TaskId:       -1,
+		NReduce:      m.NReduce,
+	}
 	return nil
 }
 
@@ -94,11 +260,28 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 
-	// Your code here.
+	ret := false
+	if len(m.workerStatuses) != 0 && m.workers == 0 {
+		ret = true
+	}
 
 	return ret
+}
+
+// number input files to meet map input requirments
+func makeInputPairs(files []string) (imfp []*InterMediateFilePair) {
+	for i, f := range files {
+		imfp = append(imfp,
+			&InterMediateFilePair{
+				X:        i,
+				Y:        -1,
+				FilePath: f},
+		)
+	}
+	return
 }
 
 //
@@ -106,12 +289,18 @@ func (m *Master) Done() bool {
 // main/mrmaster.go calls this function.
 // nReduce is the number of reduce tasks to use, not map tasks
 //
+
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{NReduce: nReduce,
-		inputsPending:   files,
-		inputsDelivered: []string{},
-		workerStatuses:  []*WorkerStatus{},
-		mutex:           sync.RWMutex{}}
+	m := Master{
+		NMap:            len(files),
+		NReduce:         nReduce,
+		inputsPending:   makeInputPairs(files),
+		inputsDelivered: make(map[int]*InterMediateFilePair),
+		reducePending:   make(map[int][]*InterMediateFilePair),
+		reduceDelivered: make(map[int]int),
+		outputFiles:     make([]string, 0),
+		workerStatuses:  make([]*WorkerStatus, 0),
+		mutex:           sync.Mutex{}}
 
 	// Your code here.
 	// split files into nReduce pieces
