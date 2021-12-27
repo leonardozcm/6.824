@@ -94,7 +94,7 @@ L:
 
 		ws := m.workerStatuses[wid]
 		if time.Since(ws.lastTimeVisited) > WatchTimeout {
-			fmt.Println("Crash or Exit happend, workerInfo ", ws)
+			fmt.Printf("Crash or Exit happend, worker %d, Info %+v\n", wid, ws)
 			// reschedule the work
 			if !ws.isIdle {
 				switch ws.workerStage {
