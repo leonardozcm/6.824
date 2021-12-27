@@ -103,14 +103,14 @@ L:
 					m.reducePending[ws.takeCareTaskID] = ws.takeCareFiles
 					delete(m.reduceDelivered, ws.takeCareTaskID)
 				case Exit:
+					m.mutex.Unlock()
 					break L
 				}
 			}
 
 			// remove the worker
-			delete(m.workerStatuses, wid)
 			m.workersLiving -= 1
-
+			m.mutex.Unlock()
 			break L
 		}
 
@@ -306,7 +306,8 @@ func (m *Master) Done() bool {
 	defer m.mutex.Unlock()
 
 	ret := false
-	if len(m.workerStatuses) != 0 && m.workersLiving == 0 {
+	if len(m.workerStatuses) != 0 && m.workersLiving == 0 &&
+		len(m.inputsDelivered)+len(m.inputsPending)+len(m.reducePending)+len(m.reduceDelivered) == 0 {
 		ret = true
 	}
 
