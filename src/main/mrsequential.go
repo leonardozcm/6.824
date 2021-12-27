@@ -27,6 +27,7 @@ func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 func main() {
+	// mr.SetLogger("workerSeq")
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: mrsequential xxx.so inputfiles...\n")
 		os.Exit(1)
@@ -84,7 +85,7 @@ func main() {
 		output := reducef(intermediate[i].Key, values)
 
 		if output_i, _ := strconv.Atoi(output); j-start+1 != output_i {
-			log.Printf("index j increase %d, output is %s\n", j-start, output)
+			fmt.Printf("index j increase %d, output is %s\n", j-start, output)
 		}
 
 		// this is the correct format for each line of Reduce output.

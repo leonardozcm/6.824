@@ -7,13 +7,15 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Master struct {
 	// Your definitions here.
 	NMap            int
 	NReduce         int
-	workers         int
+	workersLiving   int
+	workersCount    int
 	inputsPending   []*InterMediateFilePair       // not delivered [filepath]
 	inputsDelivered map[int]*InterMediateFilePair // delivered {workerid:filepath}
 
@@ -23,7 +25,7 @@ type Master struct {
 
 	outputFiles []string // [outputfiles(mr-output-Y)]
 
-	workerStatuses []*WorkerStatus
+	workerStatuses map[int]*WorkerStatus
 	mutex          sync.Mutex
 }
 
@@ -33,21 +35,26 @@ type WorkerStage int
 const (
 	Mapping WorkerStage = iota
 	Reducing
+	Exit
 )
 
+const WatchTimeout = 5 * time.Second
+
 type WorkerStatus struct {
-	isIdle         bool
-	workerStage    WorkerStage
-	takeCareTaskID int                     // for map/reduce stage, -1 for unset status
-	takeCareFiles  []*InterMediateFilePair // for map/reduce stage, [] for unset status
+	isIdle          bool
+	workerStage     WorkerStage
+	takeCareTaskID  int                     // for map/reduce stage, -1 for unset status
+	takeCareFiles   []*InterMediateFilePair // for map/reduce stage, [] for unset status
+	lastTimeVisited time.Time
 }
 
 func resetWS(ws WorkerStage) *WorkerStatus {
 	return &WorkerStatus{
-		isIdle:         true,
-		workerStage:    ws,
-		takeCareTaskID: -1,
-		takeCareFiles:  []*InterMediateFilePair{},
+		isIdle:          true,
+		workerStage:     ws,
+		takeCareTaskID:  -1,
+		takeCareFiles:   []*InterMediateFilePair{},
+		lastTimeVisited: time.Now(),
 	}
 }
 
@@ -64,17 +71,54 @@ func (m *Master) RegisterWorker(req EmptyArgs, reply *MasterReplyArgs) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	m.workerStatuses = append(m.workerStatuses, resetWS(Mapping))
-	m.workers += 1
+	m.workerStatuses[m.workersCount] = resetWS(Mapping)
 	*reply = MasterReplyArgs{
-		WorkerID:     len(m.workerStatuses) - 1,
+		WorkerID:     m.workersCount,
 		Command:      WAIT,
 		ProcessFiles: []*InterMediateFilePair{},
 		TaskId:       -1,
 		NReduce:      m.NReduce,
 	}
+	// go m.observeWorker(m.workersCount)
+	m.workersLiving += 1
+	m.workersCount += 1
 
 	return nil
+}
+
+func (m *Master) observeWorker(wid int) {
+L:
+	for {
+		m.mutex.Lock()
+
+		ws := m.workerStatuses[wid]
+		if time.Since(ws.lastTimeVisited) > WatchTimeout {
+			// reschedule the work
+			if !ws.isIdle {
+				switch ws.workerStage {
+				case Mapping:
+					m.inputsPending = append(m.inputsPending, ws.takeCareFiles...)
+					delete(m.inputsDelivered, ws.takeCareTaskID)
+				case Reducing:
+					m.reducePending[ws.takeCareTaskID] = ws.takeCareFiles
+					delete(m.reduceDelivered, ws.takeCareTaskID)
+				case Exit:
+					break L
+				}
+			}
+
+			// remove the worker
+			delete(m.workerStatuses, wid)
+			m.workersLiving -= 1
+
+			break L
+		}
+
+		m.mutex.Unlock()
+
+		time.Sleep(WatchTimeout)
+	}
+
 }
 
 func (m *Master) OnApplyForMapTask(req *WorkerRequestArgs, reply *MasterReplyArgs) error {
@@ -166,13 +210,14 @@ func (m *Master) OnApplyForReduceTask(req *WorkerRequestArgs, reply *MasterReply
 		// ALL Reduce tasks are Done
 		if len(m.reduceDelivered) == 0 {
 			m.workerStatuses[idx] = resetWS(Reducing)
+			m.workerStatuses[idx].workerStage = Exit
 			*reply = MasterReplyArgs{
 				WorkerID:     idx,
 				Command:      EXIT,
 				ProcessFiles: []*InterMediateFilePair{},
 				TaskId:       -1,
 			}
-			m.workers -= 1
+			m.workersLiving -= 1
 			return nil
 		}
 
@@ -261,7 +306,7 @@ func (m *Master) Done() bool {
 	defer m.mutex.Unlock()
 
 	ret := false
-	if len(m.workerStatuses) != 0 && m.workers == 0 {
+	if len(m.workerStatuses) != 0 && m.workersLiving == 0 {
 		ret = true
 	}
 
@@ -297,7 +342,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 		reducePending:   make(map[int][]*InterMediateFilePair),
 		reduceDelivered: make(map[int]int),
 		outputFiles:     make([]string, 0),
-		workerStatuses:  make([]*WorkerStatus, 0),
+		workerStatuses:  make(map[int]*WorkerStatus, 0),
 		mutex:           sync.Mutex{}}
 
 	// Your code here.

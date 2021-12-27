@@ -247,7 +247,7 @@ func ReduceOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 		output := worker.reducef(intermediate[i].Key, values)
 
 		if output_i, _ := strconv.Atoi(output); j-start+1 != output_i {
-			fmt.Printf("index j increase %d, output is %s\n", j-start, output)
+			// log.Printf("index j increase %d, output is %s\n", j-start, output)
 		}
 
 		// this is the correct format for each line of Reduce output.
