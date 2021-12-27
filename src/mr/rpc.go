@@ -7,6 +7,7 @@ package mr
 //
 
 import (
+	"log"
 	"os"
 	"strconv"
 )
@@ -60,4 +61,12 @@ func masterSock() string {
 	s := "/var/tmp/824-mr-"
 	s += strconv.Itoa(os.Getuid())
 	return s
+}
+
+func SetLogger(charactor string) {
+	f, err := os.OpenFile("../log/"+charactor+".log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	log.SetOutput(f)
 }

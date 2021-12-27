@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -64,8 +63,6 @@ func resetWS(ws WorkerStage) *WorkerStatus {
 func (m *Master) RegisterWorker(req EmptyArgs, reply *MasterReplyArgs) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-
-	fmt.Println("empty req:", req.Msg)
 
 	m.workerStatuses = append(m.workerStatuses, resetWS(Mapping))
 	m.workers += 1
@@ -291,6 +288,7 @@ func makeInputPairs(files []string) (imfp []*InterMediateFilePair) {
 //
 
 func MakeMaster(files []string, nReduce int) *Master {
+	SetLogger("master")
 	m := Master{
 		NMap:            len(files),
 		NReduce:         nReduce,

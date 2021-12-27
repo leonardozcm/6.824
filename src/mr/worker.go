@@ -57,6 +57,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// 1. register this worker process to master
 	worker := Register()
+	SetLogger("worker" + strconv.Itoa(worker.wid))
 	worker.mapf = mapf
 	worker.reducef = reducef
 
@@ -156,7 +157,7 @@ func MapOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 
 	// write to mr-X-Y
 	X := reply.TaskId
-	imFileName := "mr-tmp/mr-%d-%d"
+	imFileName := "mr-%d-%d"
 	imFileKVMap := make(map[int][]KeyValue)
 	// 1. Process kvs 2 map
 	for _, kv := range intermediate {
@@ -198,7 +199,6 @@ func MapOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 func ReduceOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 	intermediate := []KeyValue{}
 	log.Println("Reduce rcv reply:", reply)
-	log.Println("Reduce rcv imFile:", reply.ProcessFiles[0])
 	for _, pf := range reply.ProcessFiles {
 		filename := pf.FilePath
 		file, err := os.Open(filename)
@@ -223,7 +223,7 @@ func ReduceOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 
 	// write to mr-output-Y
 	Y := reply.TaskId
-	outputFileName := "mr-tmp/mr-output-%d"
+	outputFileName := "mr-output-%d"
 	oname := fmt.Sprintf(outputFileName, Y)
 	ofile, _ := os.Create(oname)
 	i := 0
