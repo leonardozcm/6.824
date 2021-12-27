@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -79,7 +80,7 @@ func (m *Master) RegisterWorker(req EmptyArgs, reply *MasterReplyArgs) error {
 		TaskId:       -1,
 		NReduce:      m.NReduce,
 	}
-	// go m.observeWorker(m.workersCount)
+	go m.observeWorker(m.workersCount)
 	m.workersLiving += 1
 	m.workersCount += 1
 
@@ -93,6 +94,7 @@ L:
 
 		ws := m.workerStatuses[wid]
 		if time.Since(ws.lastTimeVisited) > WatchTimeout {
+			fmt.Println("Crash or Exit happend, workerInfo ", ws)
 			// reschedule the work
 			if !ws.isIdle {
 				switch ws.workerStage {
@@ -122,8 +124,8 @@ L:
 }
 
 func (m *Master) OnApplyForMapTask(req *WorkerRequestArgs, reply *MasterReplyArgs) error {
-	// m.mutex.Lock()
-	// defer m.mutex.Unlock()
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 
 	idx := req.WorkerID
 	log.Println("Master OnApplyForMapTask:", len(m.inputsPending), " ", len(m.inputsDelivered))
@@ -338,13 +340,20 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{
 		NMap:            len(files),
 		NReduce:         nReduce,
+		workersLiving:   0,
+		workersCount:    0,
 		inputsPending:   makeInputPairs(files),
 		inputsDelivered: make(map[int]*InterMediateFilePair),
+
+		reduceptr:       0,
 		reducePending:   make(map[int][]*InterMediateFilePair),
 		reduceDelivered: make(map[int]int),
-		outputFiles:     make([]string, 0),
-		workerStatuses:  make(map[int]*WorkerStatus, 0),
-		mutex:           sync.Mutex{}}
+
+		outputFiles: make([]string, 0),
+
+		workerStatuses: make(map[int]*WorkerStatus, 0),
+		mutex:          sync.Mutex{},
+	}
 
 	// Your code here.
 	// split files into nReduce pieces
