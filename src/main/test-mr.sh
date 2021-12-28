@@ -10,7 +10,6 @@ RACE=
 #RACE=-race
 
 # run the test in a fresh sub-directory.
-rm -f log/*
 rm -rf mr-tmp
 mkdir mr-tmp || exit 1
 cd mr-tmp || exit 1
@@ -209,3 +208,4 @@ else
     echo '***' FAILED SOME TESTS
     exit 1
 fi
+
