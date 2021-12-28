@@ -57,7 +57,6 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// 1. register this worker process to master
 	worker := Register()
-	SetLogger("worker" + strconv.Itoa(worker.wid))
 	worker.mapf = mapf
 	worker.reducef = reducef
 
@@ -71,6 +70,7 @@ M:
 			ApplyForMapTask(worker, reply)
 		case MAP:
 			MapOps(worker, reply)
+			*reply = MasterReplyArgs{} // it is necessary to remalloc reply space
 		case REDUCE:
 			break M
 		}
@@ -88,7 +88,7 @@ R:
 			ApplyForReduceTask(worker, reply)
 		case REDUCE:
 			ReduceOps(worker, reply)
-
+			*reply = MasterReplyArgs{}
 		case EXIT:
 			break R
 		}
@@ -117,7 +117,7 @@ func ApplyForMapTask(worker *WorkerInfo, reply *MasterReplyArgs) {
 	req := WorkerRequestArgs{
 		WorkerID: worker.wid,
 	}
-	*reply = MasterReplyArgs{} // it is necessary to remalloc reply space
+
 	log.Println("Worker Before ApplyForMapTask:", reply)
 	call("Master.OnApplyForMapTask", &req, reply)
 	log.Println("Worker After ApplyForMapTask:", reply)
@@ -129,7 +129,6 @@ func ApplyForReduceTask(worker *WorkerInfo, reply *MasterReplyArgs) {
 		WorkerID: worker.wid,
 	}
 
-	*reply = MasterReplyArgs{}
 	log.Println("Worker Before ApplyForReduceTask:", reply)
 	call("Master.OnApplyForReduceTask", &req, reply)
 	log.Println("Worker After ApplyForReduceTask:", reply)
@@ -157,7 +156,7 @@ func MapOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 
 	// write to mr-X-Y
 	X := reply.TaskId
-	imFileName := "mr-%d-%d"
+	imFileName := "mr-tmp/mr-%d-%d"
 	imFileKVMap := make(map[int][]KeyValue)
 	// 1. Process kvs 2 map
 	for _, kv := range intermediate {
@@ -199,6 +198,7 @@ func MapOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 func ReduceOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 	intermediate := []KeyValue{}
 	log.Println("Reduce rcv reply:", reply)
+	log.Println("Reduce rcv imFile:", reply.ProcessFiles[0])
 	for _, pf := range reply.ProcessFiles {
 		filename := pf.FilePath
 		file, err := os.Open(filename)
@@ -223,7 +223,7 @@ func ReduceOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 
 	// write to mr-output-Y
 	Y := reply.TaskId
-	outputFileName := "mr-output-%d"
+	outputFileName := "mr-tmp/mr-output-%d"
 	oname := fmt.Sprintf(outputFileName, Y)
 	ofile, _ := os.Create(oname)
 	i := 0
@@ -247,7 +247,7 @@ func ReduceOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 		output := worker.reducef(intermediate[i].Key, values)
 
 		if output_i, _ := strconv.Atoi(output); j-start+1 != output_i {
-			// log.Printf("index j increase %d, output is %s\n", j-start, output)
+			fmt.Printf("index j increase %d, output is %s\n", j-start, output)
 		}
 
 		// this is the correct format for each line of Reduce output.
