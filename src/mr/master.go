@@ -19,8 +19,7 @@ type Master struct {
 	inputsPending   []*InterMediateFilePair       // not delivered [filepath]
 	inputsDelivered map[int]*InterMediateFilePair // delivered {workerid:filepath}
 
-	reduceptr       int
-	reducePending   map[int][]*InterMediateFilePair //  map[Y]:[{X, filePath(mr-X-Y)}]
+	reducePending   map[int][]*InterMediateFilePair //  map[Y]:[{X, Y, filePath(mr-X-Y)}]
 	reduceDelivered map[int]int                     // map[Y]:workerid
 
 	outputFiles []string // [outputfiles(mr-output-Y)]
@@ -240,30 +239,32 @@ func (m *Master) OnApplyForReduceTask(req *WorkerRequestArgs, reply *MasterReply
 		}
 	}
 
-	imFiles := m.reducePending[m.reduceptr] // dequene
+	for Y, v := range m.reducePending {
 
-	m.workerStatuses[idx] = &WorkerStatus{
-		isIdle:          false,
-		workerStage:     Reducing,
-		takeCareTaskID:  m.reduceptr,
-		takeCareFiles:   imFiles,
-		lastTimeVisited: time.Now(),
+		m.workerStatuses[idx] = &WorkerStatus{
+			isIdle:          false,
+			workerStage:     Reducing,
+			takeCareTaskID:  Y,
+			takeCareFiles:   v,
+			lastTimeVisited: time.Now(),
+		}
+
+		m.reduceDelivered[Y] = idx
+
+		*reply = MasterReplyArgs{
+			WorkerID:     idx,
+			TaskId:       Y,
+			NReduce:      m.NReduce,
+			Command:      REDUCE,
+			ProcessFiles: v,
+		}
+		log.Printf("wid: %d OnApplyForReduceTask After send reply: %+v\n", req.WorkerID, reply)
+
+		// dequeue at last is more safe
+		delete(m.reducePending, Y)
+		break
 	}
 
-	m.reduceDelivered[m.reduceptr] = idx
-
-	*reply = MasterReplyArgs{
-		WorkerID:     idx,
-		TaskId:       m.reduceptr,
-		NReduce:      m.NReduce,
-		Command:      REDUCE,
-		ProcessFiles: imFiles,
-	}
-	log.Printf("wid: %d OnApplyForReduceTask After send reply: %+v\n", req.WorkerID, reply)
-
-	// dequeue at last is more safe
-	delete(m.reducePending, m.reduceptr)
-	m.reduceptr += 1
 	return nil
 }
 
@@ -355,7 +356,6 @@ func MakeMaster(files []string, nReduce int) *Master {
 		inputsPending:   makeInputPairs(files),
 		inputsDelivered: make(map[int]*InterMediateFilePair),
 
-		reduceptr:       0,
 		reducePending:   make(map[int][]*InterMediateFilePair),
 		reduceDelivered: make(map[int]int),
 
