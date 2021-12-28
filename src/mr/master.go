@@ -90,13 +90,15 @@ func (m *Master) RegisterWorker(req EmptyArgs, reply *MasterReplyArgs) error {
 func (m *Master) observeWorker(wid int) {
 L:
 	for {
+		time.Sleep(WatchTimeout)
 		m.mutex.Lock()
 
 		ws := m.workerStatuses[wid]
+		fmt.Println("wid: ", wid, " time duraing", time.Since(ws.lastTimeVisited))
 		if time.Since(ws.lastTimeVisited) > WatchTimeout {
-			fmt.Printf("Crash or Exit happend, worker %d, Info %+v\n", wid, ws)
 			// reschedule the work
 			if !ws.isIdle {
+				fmt.Printf("Crash happend, worker %d, Info %+v\n", wid, ws)
 				switch ws.workerStage {
 				case Mapping:
 					m.inputsPending = append(m.inputsPending, ws.takeCareFiles...)
@@ -104,10 +106,9 @@ L:
 				case Reducing:
 					m.reducePending[ws.takeCareTaskID] = ws.takeCareFiles
 					delete(m.reduceDelivered, ws.takeCareTaskID)
-				case Exit:
-					m.mutex.Unlock()
-					break L
 				}
+			} else {
+				fmt.Printf("Exit happend, worker %d, Info %+v\n", wid, ws)
 			}
 
 			// remove the worker
@@ -118,7 +119,6 @@ L:
 
 		m.mutex.Unlock()
 
-		time.Sleep(WatchTimeout)
 	}
 
 }
@@ -161,6 +161,7 @@ func (m *Master) OnApplyForMapTask(req *WorkerRequestArgs, reply *MasterReplyArg
 		takeCareFiles: []*InterMediateFilePair{
 			imFile,
 		},
+		lastTimeVisited: time.Now(),
 	}
 
 	m.inputsDelivered[imFile.X] = imFile
@@ -236,10 +237,11 @@ func (m *Master) OnApplyForReduceTask(req *WorkerRequestArgs, reply *MasterReply
 	imFiles := m.reducePending[m.reduceptr] // dequene
 
 	m.workerStatuses[idx] = &WorkerStatus{
-		isIdle:         false,
-		workerStage:    Reducing,
-		takeCareTaskID: m.reduceptr,
-		takeCareFiles:  imFiles,
+		isIdle:          false,
+		workerStage:     Reducing,
+		takeCareTaskID:  m.reduceptr,
+		takeCareFiles:   imFiles,
+		lastTimeVisited: time.Now(),
 	}
 
 	m.reduceDelivered[m.reduceptr] = idx

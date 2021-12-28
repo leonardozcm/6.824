@@ -29,8 +29,8 @@ rm -f mr-*
 failed_any=0
 
 # first word-count
-while :
-do
+# while :
+# do
     echo "-- A New Iteration --"
     # generate the correct output
     rm -f ../log/*
@@ -84,5 +84,5 @@ else
   echo '---' crash test: FAIL
   failed_any=1
 fi
-    sleep 2
-done
+#     sleep 2
+# done
