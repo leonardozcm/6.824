@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"../mr"
 )
@@ -25,6 +26,11 @@ func maybeCrash() {
 	if rr.Int64() < 330 {
 		// crash!
 		os.Exit(1)
+	} else if rr.Int64() < 660 {
+		// delay for a while.
+		maxms := big.NewInt(10 * 1000)
+		ms, _ := crand.Int(crand.Reader, maxms)
+		time.Sleep(time.Duration(ms.Int64()) * time.Millisecond)
 	}
 }
 

@@ -41,20 +41,21 @@ const WatchTimeout = 5 * time.Second
 
 type WorkerStatus struct {
 	isIdle          bool
+	isAlive         bool
 	workerStage     WorkerStage
 	takeCareTaskID  int                     // for map/reduce stage, -1 for unset status
 	takeCareFiles   []*InterMediateFilePair // for map/reduce stage, [] for unset status
 	lastTimeVisited time.Time
 }
 
-func resetWS(ws WorkerStage) *WorkerStatus {
-	return &WorkerStatus{
-		isIdle:          true,
-		workerStage:     ws,
-		takeCareTaskID:  -1,
-		takeCareFiles:   []*InterMediateFilePair{},
-		lastTimeVisited: time.Now(),
-	}
+func resetWS(ws *WorkerStatus, stage WorkerStage) {
+	ws.isIdle = true
+	ws.workerStage = stage
+	ws.takeCareTaskID = -1
+	ws.takeCareFiles = []*InterMediateFilePair{}
+	ws.lastTimeVisited = time.Now()
+	ws.isAlive = true
+
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -70,7 +71,14 @@ func (m *Master) RegisterWorker(req EmptyArgs, reply *MasterReplyArgs) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	m.workerStatuses[m.workersCount] = resetWS(Mapping)
+	m.workerStatuses[m.workersCount] = &WorkerStatus{
+		isIdle:          true,
+		workerStage:     Mapping,
+		takeCareTaskID:  -1,
+		takeCareFiles:   []*InterMediateFilePair{},
+		lastTimeVisited: time.Now(),
+		isAlive:         true,
+	}
 	*reply = MasterReplyArgs{
 		WorkerID:     m.workersCount,
 		Command:      WAIT,
@@ -93,11 +101,11 @@ L:
 		m.mutex.Lock()
 
 		ws := m.workerStatuses[wid]
-		log.Println("wid: ", wid, " time duraing", time.Since(ws.lastTimeVisited))
+		log.Println("wid", wid, " time duraing", time.Since(ws.lastTimeVisited))
 		if time.Since(ws.lastTimeVisited) > WatchTimeout {
 			// reschedule the work
 			if !ws.isIdle {
-				log.Printf("Crash happend, worker %d, Info %+v\n", wid, ws)
+				log.Printf("Crash happend, wid %d, Info %+v\n", wid, ws)
 				switch ws.workerStage {
 				case Mapping:
 					m.inputsPending = append(m.inputsPending, ws.takeCareFiles...)
@@ -107,10 +115,11 @@ L:
 					delete(m.reduceDelivered, ws.takeCareTaskID)
 				}
 			} else {
-				log.Printf("Exit happend, worker %d, Info %+v\n", wid, ws)
+				log.Printf("Exit happend, wid %d, Info %+v\n", wid, ws)
 			}
 
 			// remove the worker
+			m.workerStatuses[wid].isAlive = false
 			m.workersLiving -= 1
 			m.mutex.Unlock()
 			break L
@@ -127,12 +136,14 @@ func (m *Master) OnApplyForMapTask(req *WorkerRequestArgs, reply *MasterReplyArg
 	defer m.mutex.Unlock()
 
 	idx := req.WorkerID
-	log.Println("wid ", req.WorkerID, " OnApplyForMapTask:", len(m.inputsPending), " ", len(m.inputsDelivered),
+
+	log.Println("wid", req.WorkerID, " OnApplyForMapTask:", len(m.inputsPending), " ", len(m.inputsDelivered),
 		" ", len(m.reducePending), " ", len(m.reduceDelivered))
+
 	if len(m.inputsPending) == 0 {
 		// All map tasks are Done
 		if len(m.inputsDelivered) == 0 {
-			m.workerStatuses[idx] = resetWS(Reducing)
+			resetWS(m.workerStatuses[idx], Reducing)
 			*reply = MasterReplyArgs{
 				WorkerID:     idx,
 				Command:      REDUCE,
@@ -143,7 +154,7 @@ func (m *Master) OnApplyForMapTask(req *WorkerRequestArgs, reply *MasterReplyArg
 		}
 
 		// Wait for other Map nodes Done
-		m.workerStatuses[idx] = resetWS(Mapping)
+		resetWS(m.workerStatuses[idx], Mapping)
 		*reply = MasterReplyArgs{
 			WorkerID:     idx,
 			Command:      WAIT,
@@ -154,15 +165,15 @@ func (m *Master) OnApplyForMapTask(req *WorkerRequestArgs, reply *MasterReplyArg
 	}
 	imFile := m.inputsPending[0] // dequene
 
-	m.workerStatuses[idx] = &WorkerStatus{
-		isIdle:         false,
-		workerStage:    Mapping,
-		takeCareTaskID: imFile.X,
-		takeCareFiles: []*InterMediateFilePair{
-			imFile,
-		},
-		lastTimeVisited: time.Now(),
+	// store task infos in workerstatus
+	ws := m.workerStatuses[idx]
+	ws.isIdle = false
+	ws.workerStage = Mapping
+	ws.takeCareTaskID = imFile.X
+	ws.takeCareFiles = []*InterMediateFilePair{
+		imFile,
 	}
+	ws.lastTimeVisited = time.Now()
 
 	m.inputsDelivered[imFile.X] = imFile
 
@@ -173,7 +184,7 @@ func (m *Master) OnApplyForMapTask(req *WorkerRequestArgs, reply *MasterReplyArg
 		Command:      MAP,
 		ProcessFiles: []*InterMediateFilePair{imFile},
 	}
-	log.Printf("wid: %d OnApplyForMapTask After send reply: %+v\n", req.WorkerID, reply)
+	log.Printf("wid %d OnApplyForMapTask After send reply: %+v\n", req.WorkerID, reply)
 
 	// dequeue at last is more safe
 	m.inputsPending = m.inputsPending[1:]
@@ -184,17 +195,23 @@ func (m *Master) OnMapWorkersDone(req *WorkerRequestArgs, reply *MasterReplyArgs
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	log.Println("wid ", req.WorkerID, " OnMapWorkersDone:", len(m.inputsPending), " ", len(m.inputsDelivered),
+	log.Println("wid", req.WorkerID, " OnMapWorkersDone:", len(m.inputsPending), " ", len(m.inputsDelivered),
 		" ", len(m.reducePending), " ", len(m.reduceDelivered))
 	idx := req.WorkerID
 	ws := m.workerStatuses[idx]
-	delete(m.inputsDelivered, ws.takeCareTaskID)
+	if !ws.isAlive {
+		// Abort this req, and let it waiting
+		m.workersLiving += 1
+		go m.observeWorker(idx)
+	} else {
+		delete(m.inputsDelivered, ws.takeCareTaskID)
 
-	for _, output := range req.Outputs {
-		m.reducePending[output.Y] = append(m.reducePending[output.Y], output)
+		for _, output := range req.Outputs {
+			m.reducePending[output.Y] = append(m.reducePending[output.Y], output)
+		}
 	}
 
-	m.workerStatuses[idx] = resetWS(Mapping)
+	resetWS(ws, Mapping)
 	*reply = MasterReplyArgs{
 		WorkerID:     idx,
 		Command:      WAIT,
@@ -202,7 +219,7 @@ func (m *Master) OnMapWorkersDone(req *WorkerRequestArgs, reply *MasterReplyArgs
 		TaskId:       -1,
 		NReduce:      m.NReduce,
 	}
-	log.Printf("wid: %d OnMapWorkersDone After send reply: %+v\n", req.WorkerID, reply)
+	log.Printf("wid %d OnMapWorkersDone After send reply: %+v\n", req.WorkerID, reply)
 	return nil
 }
 
@@ -210,15 +227,16 @@ func (m *Master) OnApplyForReduceTask(req *WorkerRequestArgs, reply *MasterReply
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	log.Println("wid ", req.WorkerID, " OnApplyForReduceTask:", len(m.inputsPending), " ", len(m.inputsDelivered),
+	log.Println("wid", req.WorkerID, " OnApplyForReduceTask:", len(m.inputsPending), " ", len(m.inputsDelivered),
 		" ", len(m.reducePending), " ", len(m.reduceDelivered))
 
 	idx := req.WorkerID
+	ws := m.workerStatuses[idx]
 	if len(m.reducePending) == 0 {
 		// ALL Reduce tasks are Done
 		if len(m.reduceDelivered) == 0 {
-			m.workerStatuses[idx] = resetWS(Reducing)
-			m.workerStatuses[idx].workerStage = Exit
+			resetWS(ws, Reducing)
+			ws.workerStage = Exit
 			*reply = MasterReplyArgs{
 				WorkerID:     idx,
 				Command:      EXIT,
@@ -230,7 +248,7 @@ func (m *Master) OnApplyForReduceTask(req *WorkerRequestArgs, reply *MasterReply
 		}
 
 		// Wait for other Map nodes Done
-		m.workerStatuses[idx] = resetWS(Reducing)
+		resetWS(ws, Reducing)
 		*reply = MasterReplyArgs{
 			WorkerID:     idx,
 			Command:      WAIT,
@@ -240,14 +258,11 @@ func (m *Master) OnApplyForReduceTask(req *WorkerRequestArgs, reply *MasterReply
 	}
 
 	for Y, v := range m.reducePending {
-
-		m.workerStatuses[idx] = &WorkerStatus{
-			isIdle:          false,
-			workerStage:     Reducing,
-			takeCareTaskID:  Y,
-			takeCareFiles:   v,
-			lastTimeVisited: time.Now(),
-		}
+		ws.isIdle = false
+		ws.workerStage = Reducing
+		ws.takeCareTaskID = Y
+		ws.takeCareFiles = v
+		ws.lastTimeVisited = time.Now()
 
 		m.reduceDelivered[Y] = idx
 
@@ -258,7 +273,7 @@ func (m *Master) OnApplyForReduceTask(req *WorkerRequestArgs, reply *MasterReply
 			Command:      REDUCE,
 			ProcessFiles: v,
 		}
-		log.Printf("wid: %d OnApplyForReduceTask After send reply: %+v\n", req.WorkerID, reply)
+		log.Printf("wid %d OnApplyForReduceTask After send reply: %+v\n", req.WorkerID, reply)
 
 		// dequeue at last is more safe
 		delete(m.reducePending, Y)
@@ -272,17 +287,22 @@ func (m *Master) OnReduceWorkersDone(req *WorkerRequestArgs, reply *MasterReplyA
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	log.Println("wid ", req.WorkerID, " OnReduceWorkersDone:", len(m.inputsPending), " ", len(m.inputsDelivered),
+	log.Println("wid", req.WorkerID, " OnReduceWorkersDone:", len(m.inputsPending), " ", len(m.inputsDelivered),
 		" ", len(m.reducePending), " ", len(m.reduceDelivered))
 	idx := req.WorkerID
 	ws := m.workerStatuses[idx]
-	delete(m.reduceDelivered, ws.takeCareTaskID)
+	if !ws.isAlive {
+		m.workersLiving += 1
+		go m.observeWorker(idx)
+	} else {
+		delete(m.reduceDelivered, ws.takeCareTaskID)
 
-	for _, output := range req.Outputs {
-		m.outputFiles = append(m.outputFiles, output.FilePath)
+		for _, output := range req.Outputs {
+			m.outputFiles = append(m.outputFiles, output.FilePath)
+		}
 	}
 
-	m.workerStatuses[idx] = resetWS(Reducing)
+	resetWS(ws, Reducing)
 	*reply = MasterReplyArgs{
 		WorkerID:     idx,
 		Command:      WAIT,
@@ -290,7 +310,7 @@ func (m *Master) OnReduceWorkersDone(req *WorkerRequestArgs, reply *MasterReplyA
 		TaskId:       -1,
 		NReduce:      m.NReduce,
 	}
-	log.Printf("wid: %d OnReduceWorkersDone After send reply: %+v\n", req.WorkerID, reply)
+	log.Printf("wid %d OnReduceWorkersDone After send reply: %+v\n", req.WorkerID, reply)
 	return nil
 }
 

@@ -29,8 +29,8 @@ rm -f mr-*
 failed_any=0
 
 # first word-count
-# while :
-# do
+while :
+do
     echo "-- A New Iteration --"
     # generate the correct output
     rm -f ../log/*
@@ -42,7 +42,7 @@ rm -f mr-out*
 
 echo '***' Starting crash test.
 
-TIMELIMIT="60s"
+TIMELIMIT="120s"
 
 rm -f mr-done
 (timeout -k 2s $TIMELIMIT ../mrmaster ../pg*txt ; touch mr-done ) &
@@ -85,6 +85,8 @@ else
   echo '---' crash output is not the same as mr-correct-crash.txt
   echo '---' crash test: FAIL
   failed_any=1
+  break
 fi
-#     sleep 2
-# done
+    echo Ready Exit
+    sleep 2
+done
