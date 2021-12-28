@@ -10,6 +10,7 @@ RACE=
 #RACE=-race
 
 # run the test in a fresh sub-directory.
+rm -f log/*
 rm -rf mr-tmp
 mkdir mr-tmp || exit 1
 cd mr-tmp || exit 1
@@ -156,8 +157,6 @@ wait ; wait
 ../mrsequential ../../mrapps/nocrash.so ../pg*txt || exit 1
 sort mr-out-0 > mr-correct-crash.txt
 rm -f mr-out*
-
-sleep 180
 
 echo '***' Starting crash test.
 

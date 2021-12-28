@@ -42,31 +42,33 @@ rm -f mr-out*
 
 echo '***' Starting crash test.
 
+TIMELIMIT="60s"
+
 rm -f mr-done
-(timeout -k 2s 180s ../mrmaster ../pg*txt ; touch mr-done ) &
+(timeout -k 2s $TIMELIMIT ../mrmaster ../pg*txt ; touch mr-done ) &
 sleep 1
 
 # start multiple workers
-timeout -k 2s 180s ../mrworker ../../mrapps/crash.so &
+timeout -k 2s $TIMELIMIT ../mrworker ../../mrapps/crash.so &
 
 # mimic rpc.go's masterSock()
 SOCKNAME=/var/tmp/824-mr-`id -u`
 
 ( while [ -e $SOCKNAME -a ! -f mr-done ]
   do
-    timeout -k 2s 180s ../mrworker ../../mrapps/crash.so
+    timeout -k 2s $TIMELIMIT ../mrworker ../../mrapps/crash.so
     sleep 1
   done ) &
 
 ( while [ -e $SOCKNAME -a ! -f mr-done ]
   do
-    timeout -k 2s 180s ../mrworker ../../mrapps/crash.so
+    timeout -k 2s $TIMELIMIT ../mrworker ../../mrapps/crash.so
     sleep 1
   done ) &
 
 while [ -e $SOCKNAME -a ! -f mr-done ]
 do
-  timeout -k 2s 180s ../mrworker ../../mrapps/crash.so
+  timeout -k 2s $TIMELIMIT ../mrworker ../../mrapps/crash.so
   sleep 1
 done
 
