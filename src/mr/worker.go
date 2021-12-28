@@ -71,7 +71,6 @@ M:
 			ApplyForMapTask(worker, reply)
 		case MAP:
 			MapOps(worker, reply)
-			*reply = MasterReplyArgs{} // it is necessary to remalloc reply space
 		case REDUCE:
 			break M
 		}
@@ -89,7 +88,7 @@ R:
 			ApplyForReduceTask(worker, reply)
 		case REDUCE:
 			ReduceOps(worker, reply)
-			*reply = MasterReplyArgs{}
+
 		case EXIT:
 			break R
 		}
@@ -118,7 +117,7 @@ func ApplyForMapTask(worker *WorkerInfo, reply *MasterReplyArgs) {
 	req := WorkerRequestArgs{
 		WorkerID: worker.wid,
 	}
-
+	*reply = MasterReplyArgs{} // it is necessary to remalloc reply space
 	log.Println("Worker Before ApplyForMapTask:", reply)
 	call("Master.OnApplyForMapTask", &req, reply)
 	log.Println("Worker After ApplyForMapTask:", reply)
@@ -130,6 +129,7 @@ func ApplyForReduceTask(worker *WorkerInfo, reply *MasterReplyArgs) {
 		WorkerID: worker.wid,
 	}
 
+	*reply = MasterReplyArgs{}
 	log.Println("Worker Before ApplyForReduceTask:", reply)
 	call("Master.OnApplyForReduceTask", &req, reply)
 	log.Println("Worker After ApplyForReduceTask:", reply)
@@ -247,7 +247,7 @@ func ReduceOps(worker *WorkerInfo, reply *MasterReplyArgs) {
 		output := worker.reducef(intermediate[i].Key, values)
 
 		if output_i, _ := strconv.Atoi(output); j-start+1 != output_i {
-			fmt.Printf("index j increase %d, output is %s\n", j-start, output)
+			// log.Printf("index j increase %d, output is %s\n", j-start, output)
 		}
 
 		// this is the correct format for each line of Reduce output.
