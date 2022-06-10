@@ -453,33 +453,55 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				// time.Sleep(100 * time.Millisecond)
 				// c.L.Lock()
 			}
-			DPrintf("Server %d start sending heartbeats.", rf.me)
+			DPrintf("Leader %d start sending heartbeats.", rf.me)
+
+			aerChan := make(chan AppendEntryReply)
+			currentTerm := rf.CurrentTerm
+			c.L.Unlock()
 
 			// Send AppendEntry
 			for i := 0; i < len(rf.peers); i++ {
 				// t.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
 				if i != rf.me {
-					var aep AppendEntryReply
 
-					DPrintf("Leader %d ready to send appendentry to server %d", rf.me, i)
-					if rf.sendAppendEntries(i,
-						&AppendEntryArgs{rf.CurrentTerm, rf.me, -1, -1, make([]interface{}, 0), -1},
-						&aep) {
-						DPrintf("Leader %d already send appendentry to server %d", rf.me, i)
-						appendCurTerm := aep.Term
-						appendSuccess := aep.Success
+					go func(i int, ch chan AppendEntryReply) {
+						var aer AppendEntryReply
+						rf.sendAppendEntries(i,
+							&AppendEntryArgs{currentTerm, rf.me, -1, -1, make([]interface{}, 0), -1},
+							&aer)
+						ch <- aer
 
-						if !appendSuccess {
-							if rf.CurrentTerm < appendCurTerm {
-								rf.CurrentTerm = appendCurTerm
-								rf.Status = Follower
-								break
-							}
-						}
-					}
+					}(i, aerChan)
 				}
 			}
-			c.L.Unlock()
+
+			var aer AppendEntryReply
+		Wait_Reply_Loop:
+			for i := 0; i < len(rf.peers); i++ {
+				select {
+				case aer = <-aerChan:
+					c.L.Lock()
+					DPrintf("Leader %d already send appendentry to server %d", rf.me, i)
+					appendCurTerm := aer.Term
+					appendSuccess := aer.Success
+
+					if !appendSuccess {
+						if rf.CurrentTerm < appendCurTerm {
+							DPrintf(`Leader %d got a msg Term bigger than itself,
+									for currentTerm is %d, appendCurTerm is %d`, rf.me, rf.CurrentTerm, appendCurTerm)
+							rf.CurrentTerm = appendCurTerm
+							rf.Status = Follower
+							c.L.Unlock()
+							break Wait_Reply_Loop
+						}
+					}
+
+					c.L.Unlock()
+				case <-time.After(200 * time.Millisecond):
+					break Wait_Reply_Loop
+				}
+			}
+
 			time.Sleep(100 * time.Millisecond)
 		}
 
