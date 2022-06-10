@@ -301,6 +301,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	return index, term, isLeader
 }
@@ -324,6 +326,150 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+func (rf *Raft) holdingElection(t *time.Timer, c *sync.Cond) {
+	for {
+		<-t.C
+		DPrintf("Server %d election timesout, start a election.", rf.me)
+		// Start an Election
+
+		c.L.Lock()
+		rf.CurrentTerm += 1
+		CurrentTerm := rf.CurrentTerm
+
+		rf.VoteFor = rf.me
+		rf.Status = Candidate
+
+		votesCount := 1
+		voteCh := make(chan RequestVoteReply)
+		c.L.Unlock()
+
+		// for when you
+		for i := 0; i < len(rf.peers); i++ {
+
+			if i != rf.me {
+
+				go func(i int, ch chan RequestVoteReply) {
+					var rvr RequestVoteReply
+					rf.sendRequestVote(i, &RequestVoteArgs{CurrentTerm, rf.me, -1, -1}, &rvr)
+					voteCh <- rvr
+				}(i, voteCh)
+
+			}
+		}
+
+		var rvr RequestVoteReply
+
+	Wait_Reply_Loop:
+		for i := 0; i < len(rf.peers); i++ {
+			select {
+			case rvr = <-voteCh:
+				c.L.Lock()
+				voteCurTerm := rvr.Term
+				voteGranted := rvr.VoteGranted
+				// Process them
+				DPrintf("Server %d got vote RequesetVoteReply%v", rf.me, rvr)
+
+				if voteCurTerm > rf.CurrentTerm {
+					rf.Status = Follower
+					rf.CurrentTerm = voteCurTerm
+					c.L.Unlock()
+					break Wait_Reply_Loop
+				}
+
+				if voteGranted {
+					votesCount += 1
+				}
+
+				c.L.Unlock()
+
+			case <-time.After(200 * time.Millisecond):
+				break Wait_Reply_Loop
+			}
+		}
+
+		// Become a leader
+		DPrintf("Server %d got votes for %d at Term %d", rf.me, votesCount, rf.CurrentTerm)
+		c.L.Lock()
+		if votesCount > int(rf.n/2) && rf.Status == Candidate {
+			DPrintf("Server %d wins leadership", rf.me)
+			rf.Status = Leader
+		}
+		c.L.Unlock()
+		c.Broadcast()
+
+		for rf.Status == Leader {
+			DPrintf("Leader %d block to be waiting as a follower", rf.me)
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
+	}
+}
+
+func (rf *Raft) trySendHeartBeat(c *sync.Cond) {
+	for {
+		// Block when not a leader
+		c.L.Lock()
+		for rf.Status != Leader {
+			DPrintf("AppendEntries: Server %d wins cond lock, status is %d", rf.me, rf.Status)
+			c.Wait()
+			// c.L.Unlock()
+			// time.Sleep(100 * time.Millisecond)
+			// c.L.Lock()
+		}
+		DPrintf("Leader %d start sending heartbeats.", rf.me)
+
+		aerChan := make(chan AppendEntryReply)
+		currentTerm := rf.CurrentTerm
+		c.L.Unlock()
+
+		// Send AppendEntry
+		for i := 0; i < len(rf.peers); i++ {
+			// t.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
+			if i != rf.me {
+
+				go func(i int, ch chan AppendEntryReply) {
+					var aer AppendEntryReply
+					rf.sendAppendEntries(i,
+						&AppendEntryArgs{currentTerm, rf.me, -1, -1, make([]interface{}, 0), -1},
+						&aer)
+					ch <- aer
+
+				}(i, aerChan)
+			}
+		}
+
+		var aer AppendEntryReply
+	Wait_Reply_Loop:
+		for i := 0; i < len(rf.peers); i++ {
+			select {
+			case aer = <-aerChan:
+				c.L.Lock()
+				DPrintf("Leader %d already send appendentry to server %d", rf.me, i)
+				appendCurTerm := aer.Term
+				appendSuccess := aer.Success
+
+				if !appendSuccess {
+					if rf.CurrentTerm < appendCurTerm {
+						DPrintf(`Leader %d got a msg Term bigger than itself,
+								for currentTerm is %d, appendCurTerm is %d`, rf.me, rf.CurrentTerm, appendCurTerm)
+						rf.CurrentTerm = appendCurTerm
+						rf.Status = Follower
+						c.L.Unlock()
+						break Wait_Reply_Loop
+					}
+				}
+
+				c.L.Unlock()
+			case <-time.After(200 * time.Millisecond):
+				break Wait_Reply_Loop
+			}
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
 }
 
 //
@@ -361,151 +507,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	DPrintf(" Server %d init", rf.me)
 
-	go func(t *time.Timer, c *sync.Cond) {
-		for {
-			<-t.C
-			DPrintf("Server %d election timesout, start a election.", rf.me)
-			// Start an Election
-
-			c.L.Lock()
-			rf.CurrentTerm += 1
-			CurrentTerm := rf.CurrentTerm
-
-			rf.VoteFor = rf.me
-			rf.Status = Candidate
-
-			votesCount := 1
-			voteCh := make(chan RequestVoteReply)
-			c.L.Unlock()
-
-			// for when you
-			for i := 0; i < len(rf.peers); i++ {
-
-				if i != rf.me {
-
-					go func(i int, ch chan RequestVoteReply) {
-						var rvr RequestVoteReply
-						rf.sendRequestVote(i, &RequestVoteArgs{CurrentTerm, rf.me, -1, -1}, &rvr)
-						voteCh <- rvr
-					}(i, voteCh)
-
-				}
-			}
-
-			var rvr RequestVoteReply
-
-		Wait_Reply_Loop:
-			for i := 0; i < len(rf.peers); i++ {
-				select {
-				case rvr = <-voteCh:
-					c.L.Lock()
-					voteCurTerm := rvr.Term
-					voteGranted := rvr.VoteGranted
-					// Process them
-					DPrintf("Server %d got vote RequesetVoteReply%v", rf.me, rvr)
-
-					if voteCurTerm > rf.CurrentTerm {
-						rf.Status = Follower
-						rf.CurrentTerm = voteCurTerm
-						c.L.Unlock()
-						break Wait_Reply_Loop
-					}
-
-					if voteGranted {
-						votesCount += 1
-					}
-
-					c.L.Unlock()
-
-				case <-time.After(200 * time.Millisecond):
-					break Wait_Reply_Loop
-				}
-			}
-
-			// Become a leader
-			DPrintf("Server %d got votes for %d at Term %d", rf.me, votesCount, rf.CurrentTerm)
-			c.L.Lock()
-			if votesCount > int(rf.n/2) && rf.Status == Candidate {
-				DPrintf("Server %d wins leadership", rf.me)
-				rf.Status = Leader
-			}
-			c.L.Unlock()
-			c.Broadcast()
-
-			for rf.Status == Leader {
-				DPrintf("Leader %d block to be waiting as a follower", rf.me)
-				time.Sleep(100 * time.Millisecond)
-			}
-			t.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
-		}
-
-	}(rf.election_timer, election_cond)
+	// Election Management
+	go rf.holdingElection(rf.election_timer, election_cond)
 
 	// AppendEntries Function
-	go func(t *time.Timer, c *sync.Cond) {
-		for {
-			// Block when not a leader
-			c.L.Lock()
-			for rf.Status != Leader {
-				DPrintf("AppendEntries: Server %d wins cond lock, status is %d", rf.me, rf.Status)
-				c.Wait()
-				// c.L.Unlock()
-				// time.Sleep(100 * time.Millisecond)
-				// c.L.Lock()
-			}
-			DPrintf("Leader %d start sending heartbeats.", rf.me)
-
-			aerChan := make(chan AppendEntryReply)
-			currentTerm := rf.CurrentTerm
-			c.L.Unlock()
-
-			// Send AppendEntry
-			for i := 0; i < len(rf.peers); i++ {
-				// t.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
-				if i != rf.me {
-
-					go func(i int, ch chan AppendEntryReply) {
-						var aer AppendEntryReply
-						rf.sendAppendEntries(i,
-							&AppendEntryArgs{currentTerm, rf.me, -1, -1, make([]interface{}, 0), -1},
-							&aer)
-						ch <- aer
-
-					}(i, aerChan)
-				}
-			}
-
-			var aer AppendEntryReply
-		Wait_Reply_Loop:
-			for i := 0; i < len(rf.peers); i++ {
-				select {
-				case aer = <-aerChan:
-					c.L.Lock()
-					DPrintf("Leader %d already send appendentry to server %d", rf.me, i)
-					appendCurTerm := aer.Term
-					appendSuccess := aer.Success
-
-					if !appendSuccess {
-						if rf.CurrentTerm < appendCurTerm {
-							DPrintf(`Leader %d got a msg Term bigger than itself,
-									for currentTerm is %d, appendCurTerm is %d`, rf.me, rf.CurrentTerm, appendCurTerm)
-							rf.CurrentTerm = appendCurTerm
-							rf.Status = Follower
-							c.L.Unlock()
-							break Wait_Reply_Loop
-						}
-					}
-
-					c.L.Unlock()
-				case <-time.After(200 * time.Millisecond):
-					break Wait_Reply_Loop
-				}
-			}
-
-			time.Sleep(100 * time.Millisecond)
-		}
-
-	}(rf.election_timer, election_cond)
+	go rf.trySendHeartBeat(election_cond)
 
 	return rf
 }
