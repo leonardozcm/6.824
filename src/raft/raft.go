@@ -75,8 +75,8 @@ type Raft struct {
 	// Persistent state for all servers
 	CurrentTerm    int
 	VoteFor        int
-	Log            []map[int]interface{}
-	LeaderNow      int
+	Logs           map[int]LogEntry
+	applyCh        chan ApplyMsg
 	election_timer *time.Timer
 
 	// Volatile state on all servers
@@ -240,12 +240,18 @@ type AppendEntryArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []interface{}
+	Entries      []LogEntry
 	LeaderCommit int
+}
+
+type LogEntry struct {
+	Term    int
+	Command interface{}
 }
 
 type AppendEntryReply struct {
 	Term    int
+	Id      int
 	Success bool
 }
 
@@ -254,6 +260,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	defer rf.mu.Unlock()
 
 	leaderTerm := args.Term
+	reply.Id = rf.me
 	// leaderId := args.LeaderId
 
 	reply.Term = rf.CurrentTerm
@@ -269,10 +276,38 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		rf.Status = Follower
 	}
 
-	rf.election_timer.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
+	// 2B append logs
+	if len(args.Entries) > 0 {
+		// Check: Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+		reqPrevLogIndex := args.PrevLogIndex
+		reqPrevLogTerm := args.PrevLogTerm
+		if checkedLog, ok := rf.Logs[reqPrevLogIndex]; !ok && checkedLog.Term != reqPrevLogTerm {
+			reply.Term = rf.CurrentTerm
+			reply.Success = false
+			return
+		}
+
+		// Check: If an existing entry conflicts with a new one (same index but different terms),
+		// delete the existing entry and all that follow it
+		if checkedLog, ok := rf.Logs[reqPrevLogIndex+1]; ok && checkedLog.Term != leaderTerm {
+			for i := reqPrevLogIndex + 1; i < len(rf.Logs)+1; i++ {
+				delete(rf.Logs, i)
+			}
+		}
+
+		// TODO: For Now Assume there only contains one entry in the list
+		for _, entry := range args.Entries {
+			rf.Logs[reqPrevLogIndex+1] = entry
+			rf.applyCh <- ApplyMsg{true, entry.Command, reqPrevLogIndex + 1}
+		}
+	}
+
+	if args.LeaderCommit > rf.CommitIndex {
+		rf.CommitIndex = Min(args.LeaderCommit, len(rf.Logs))
+	}
 
 	reply.Success = true
-	// 2B append logs
+	rf.election_timer.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
 
 }
 
@@ -303,8 +338,99 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.Status != Leader {
+		isLeader = false
+		return index, term, isLeader
+	}
+
+	term = rf.CurrentTerm
+	index = len(rf.Logs) + 1
+	// Append itself
+	rf.Logs[index] = LogEntry{term, command}
+	rf.applyCh <- ApplyMsg{true, command, index}
+
+	// Check preLog status
+	preLogIndex := index - 1
+	preLogTerm := 0
+	leaderCommitted := rf.CommitIndex
+	if preLogIndex > 0 {
+		preLogTerm = rf.Logs[preLogIndex].Term
+	}
+
+	ch := rf.sendAEs(command, term, preLogIndex, preLogTerm, leaderCommitted)
+	DPrintf("Leader %d send cmd %d.", rf.me, command)
+	go rf.checkCommitted(ch, preLogIndex+1, false)
+	DPrintf("Leader %d checking commits", rf.me)
 
 	return index, term, isLeader
+}
+
+func (rf *Raft) sendAEs(command interface{}, term int, preLogIndex int, preLogTerm int, committedIndex int) chan AppendEntryReply {
+	aerChan := make(chan AppendEntryReply)
+	for i := 0; i < rf.n; i++ {
+		if i != rf.me {
+			go func(i int, ch chan AppendEntryReply) {
+				var aer AppendEntryReply
+
+				logs := []LogEntry{}
+				if command != nil {
+					logs = append(logs, LogEntry{term, command})
+				}
+
+				rf.sendAppendEntries(i,
+					&AppendEntryArgs{term, rf.me, preLogIndex, preLogTerm, logs, committedIndex},
+					&aer)
+				ch <- aer
+
+			}(i, aerChan)
+		}
+	}
+	return aerChan
+}
+
+func (rf *Raft) checkCommitted(aerChan chan AppendEntryReply, index int, command interface{}) {
+	var aer AppendEntryReply
+	commitCount := 0
+Wait_Reply_Loop:
+	for i := 0; i < rf.n-1; i++ {
+		select {
+		case aer = <-aerChan:
+			rf.mu.Lock()
+			DPrintf("Leader %d already send appendentry to server %d", rf.me, i)
+			appendCurTerm := aer.Term
+			appendSuccess := aer.Success
+
+			if !appendSuccess {
+				if rf.CurrentTerm < appendCurTerm {
+					DPrintf(`Leader %d got a msg Term bigger than itself,
+								for currentTerm is %d, appendCurTerm is %d`, rf.me, rf.CurrentTerm, appendCurTerm)
+					rf.CurrentTerm = appendCurTerm
+					rf.Status = Follower
+					rf.mu.Unlock()
+					break Wait_Reply_Loop
+				}
+
+				// 2B TODO: Did not find a logentry match prevLogIndex and prevLogTerm at the same time
+				// re-send with preLogIndex-1 until it macthes
+
+			} else if command != nil {
+				// check commited, in case of commited sequentially
+				revId := aer.Id
+				rf.NextIndex[revId] += 1
+				DPrintf("Leader %d receive Server %d reply whose command is not nil", rf.me, revId)
+
+				commitCount += 1
+				if commitCount > int(rf.n/2) {
+					rf.CommitIndex = Max(index, rf.CommitIndex)
+				}
+
+			}
+
+			rf.mu.Unlock()
+		case <-time.After(200 * time.Millisecond):
+			break Wait_Reply_Loop
+		}
+	}
 }
 
 //
@@ -346,7 +472,7 @@ func (rf *Raft) holdingElection(t *time.Timer, c *sync.Cond) {
 		c.L.Unlock()
 
 		// for when you
-		for i := 0; i < len(rf.peers); i++ {
+		for i := 0; i < rf.n; i++ {
 
 			if i != rf.me {
 
@@ -362,7 +488,7 @@ func (rf *Raft) holdingElection(t *time.Timer, c *sync.Cond) {
 		var rvr RequestVoteReply
 
 	Wait_Reply_Loop:
-		for i := 0; i < len(rf.peers); i++ {
+		for i := 0; i < rf.n; i++ {
 			select {
 			case rvr = <-voteCh:
 				c.L.Lock()
@@ -412,7 +538,6 @@ func (rf *Raft) trySendHeartBeat(c *sync.Cond) {
 		// Block when not a leader
 		c.L.Lock()
 		for rf.Status != Leader {
-			DPrintf("AppendEntries: Server %d wins cond lock, status is %d", rf.me, rf.Status)
 			c.Wait()
 			// c.L.Unlock()
 			// time.Sleep(100 * time.Millisecond)
@@ -420,53 +545,21 @@ func (rf *Raft) trySendHeartBeat(c *sync.Cond) {
 		}
 		DPrintf("Leader %d start sending heartbeats.", rf.me)
 
-		aerChan := make(chan AppendEntryReply)
 		currentTerm := rf.CurrentTerm
+
+		// Check preLog status
+		preLogIndex := len(rf.Logs)
+		preLogTerm := 0
+		leaderCommitted := rf.CommitIndex
+		if preLogIndex > 0 {
+			preLogTerm = rf.Logs[preLogIndex].Term
+		}
 		c.L.Unlock()
 
 		// Send AppendEntry
-		for i := 0; i < len(rf.peers); i++ {
-			// t.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
-			if i != rf.me {
+		aerChan := rf.sendAEs(nil, currentTerm, preLogIndex, preLogTerm, leaderCommitted)
 
-				go func(i int, ch chan AppendEntryReply) {
-					var aer AppendEntryReply
-					rf.sendAppendEntries(i,
-						&AppendEntryArgs{currentTerm, rf.me, -1, -1, make([]interface{}, 0), -1},
-						&aer)
-					ch <- aer
-
-				}(i, aerChan)
-			}
-		}
-
-		var aer AppendEntryReply
-	Wait_Reply_Loop:
-		for i := 0; i < len(rf.peers); i++ {
-			select {
-			case aer = <-aerChan:
-				c.L.Lock()
-				DPrintf("Leader %d already send appendentry to server %d", rf.me, i)
-				appendCurTerm := aer.Term
-				appendSuccess := aer.Success
-
-				if !appendSuccess {
-					if rf.CurrentTerm < appendCurTerm {
-						DPrintf(`Leader %d got a msg Term bigger than itself,
-								for currentTerm is %d, appendCurTerm is %d`, rf.me, rf.CurrentTerm, appendCurTerm)
-						rf.CurrentTerm = appendCurTerm
-						rf.Status = Follower
-						c.L.Unlock()
-						break Wait_Reply_Loop
-					}
-				}
-
-				c.L.Unlock()
-			case <-time.After(200 * time.Millisecond):
-				break Wait_Reply_Loop
-			}
-		}
-
+		go rf.checkCommitted(aerChan, rf.me, nil)
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -490,14 +583,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.n = len(peers)
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 
 	// 2A: To implement most of the functions a raft serve must hold
 	rf.Status = Follower
-	rf.LeaderNow = -1 // Unknow
 	rf.CurrentTerm = 0
 	rf.VoteFor = -1
+
+	// 2B: Init Log apply and commit index
+	rf.LastApplied = 0
+	rf.CommitIndex = 0
+	rf.Logs = make(map[int]LogEntry)
+	rf.NextIndex = make([]int, rf.n)
+	for i := 0; i < rf.n; i++ {
+		rf.NextIndex[i] = 1
+	}
+	rf.MatchIndex = make([]int, rf.n)
 
 	election_cond := sync.NewCond(&rf.mu)
 	rf.election_timer = time.NewTimer(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
