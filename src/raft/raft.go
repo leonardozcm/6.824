@@ -433,6 +433,88 @@ Wait_Reply_Loop:
 	}
 }
 
+func (rf *Raft) sendAndCheckAppendEntry() chan AppendEntryReply {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	lastLogIndex := len(rf.Logs)
+	aerChan := make(chan AppendEntryReply)
+
+	for i := 0; i < rf.n; i++ {
+		if i != rf.me {
+			go func(i int, ch chan AppendEntryReply) {
+
+				var aer AppendEntryReply
+				prevLogIndex := rf.NextIndex[i] - 1
+				prevLogTerm := 0
+				if prevLogIndex > 0 {
+					prevLogTerm = rf.Logs[prevLogIndex].Term
+				}
+				logs := []LogEntry{}
+				if rf.NextIndex[i] <= lastLogIndex {
+					for j := rf.NextIndex[i]; j < lastLogIndex; j++ {
+						logs = append(logs, rf.Logs[j])
+					}
+				}
+				rf.sendAppendEntries(i,
+					&AppendEntryArgs{rf.CurrentTerm, rf.me, prevLogIndex, prevLogTerm, logs, rf.CommitIndex},
+					&aer)
+				ch <- aer
+
+			}(i, aerChan)
+		}
+	}
+
+	return aerChan
+}
+
+func (rf *Raft) checkAppendEntryReply(aerChan chan AppendEntryReply, checkIndex int) {
+	var aer AppendEntryReply
+	commitCount := 0
+Wait_Reply_Loop:
+	for i := 0; i < rf.n-1; i++ {
+		select {
+		case aer = <-aerChan:
+			rf.mu.Lock()
+			DPrintf("Leader %d already send appendentry to server %d", rf.me, i)
+			appendCurTerm := aer.Term
+			appendSuccess := aer.Success
+
+			if !appendSuccess {
+				if rf.CurrentTerm < appendCurTerm {
+					DPrintf(`Leader %d got a msg Term bigger than itself,
+								for currentTerm is %d, appendCurTerm is %d`, rf.me, rf.CurrentTerm, appendCurTerm)
+					rf.CurrentTerm = appendCurTerm
+					rf.Status = Follower
+					rf.mu.Unlock()
+					break Wait_Reply_Loop
+				}
+
+				// 2B TODO: Did not find a logentry match prevLogIndex and prevLogTerm at the same time
+				// re-send with preLogIndex-1 until it macthes
+				revId := aer.Id
+				rf.NextIndex[revId] = Max(checkIndex, rf.NextIndex[revId])
+
+			} else {
+				// check commited, in case of commited sequentially
+				revId := aer.Id
+				rf.NextIndex[revId] = Max(checkIndex, rf.NextIndex[revId])
+				DPrintf("Leader %d receive Server %d reply whose command is not nil", rf.me, revId)
+
+				commitCount += 1
+				if commitCount > int(rf.n/2) {
+					rf.CommitIndex = Max(checkIndex, rf.CommitIndex)
+				}
+
+			}
+
+			rf.mu.Unlock()
+		case <-time.After(200 * time.Millisecond):
+			break Wait_Reply_Loop
+		}
+	}
+}
+
 //
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
