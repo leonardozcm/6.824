@@ -313,15 +313,18 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 
 	// TODO: For Now Assume there only contains one entry in the list
+
+	iter := reqPrevLogIndex + 1
 	for _, entry := range args.Entries {
-		rf.Logs[reqPrevLogIndex+1] = entry
+		rf.Logs[iter] = entry
+		iter += 1
 	}
 
 	if args.LeaderCommit > rf.CommitIndex {
 		rf.CommitIndex = Min(args.LeaderCommit, len(rf.Logs))
 	}
 
-	if rf.CommitIndex > rf.LastApplied {
+	for rf.CommitIndex > rf.LastApplied {
 		rf.LastApplied += 1
 		DPrintf("Server %d apply index %d, commited index is %d", rf.me, rf.LastApplied, rf.CommitIndex)
 		rf.applyCh <- ApplyMsg{true, rf.Logs[rf.LastApplied].Command, rf.LastApplied}
@@ -388,7 +391,9 @@ func (rf *Raft) sendAEs(curTerm int, commitIndex int) chan AppendEntryReply {
 			lastLogIndex := len(rf.Logs)
 
 			if nextIndex <= lastLogIndex {
-				logs = append(logs, rf.Logs[nextIndex])
+				for i := nextIndex; i < lastLogIndex+1; i++ {
+					logs = append(logs, rf.Logs[i])
+				}
 			}
 
 			preLogIndex := nextIndex - 1
