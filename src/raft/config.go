@@ -452,7 +452,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
-					DPrintf("Leader %d Start cmd %v", starts, cmd)
+					DPrintf("Server %d Start cmd %v", starts, cmd)
 					break
 				}
 			}

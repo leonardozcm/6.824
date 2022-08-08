@@ -185,7 +185,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.CurrentTerm > candidateTerm ||
 		(rf.CurrentTerm == candidateTerm && rf.VoteFor != -1 && rf.VoteFor != candidateId) ||
 		// In 2B need to guarantee that candidate’s log is at least as up-to-date as receiver’s log
-		len(rf.Logs) > 0 && (rf.Logs[len(rf.Logs)].Term > args.LastLogTerm || len(rf.Logs) > args.LastLogIndex) {
+		(len(rf.Logs) > 0 && rf.Logs[len(rf.Logs)].Term > args.LastLogTerm) ||
+		len(rf.Logs) > 0 && (rf.Logs[len(rf.Logs)].Term == args.LastLogTerm && len(rf.Logs) > args.LastLogIndex) {
 		reply.VoteGranted = false
 		reply.Term = rf.CurrentTerm
 		DPrintf("Server %d do not vote for %d, len(rf.logs) is %d, args.LastLogTerm is %d, args.LastLogIndex is %d",
@@ -285,7 +286,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	// Check: Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	reqPrevLogIndex := args.PrevLogIndex
 	reqPrevLogTerm := args.PrevLogTerm
-	if checkedLog, ok := rf.Logs[reqPrevLogIndex]; !ok && checkedLog.Term != reqPrevLogTerm {
+	if checkedLog, ok := rf.Logs[reqPrevLogIndex]; ok && checkedLog.Term != reqPrevLogTerm {
 		reply.Term = rf.CurrentTerm
 		reply.LastIndex = len(rf.Logs)
 		reply.Success = false
@@ -301,7 +302,9 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	if checkedLog, ok := rf.Logs[reqPrevLogIndex+1]; ok && checkedLog.Term != args_Term {
 		DPrintf("Server %d has existing entry at index %d (value %v) conflicts with a new one", rf.me, reqPrevLogIndex+1, rf.Logs[reqPrevLogIndex+1])
-		for i := reqPrevLogIndex + 1; i < len(rf.Logs)+1; i++ {
+		tail := len(rf.Logs) + 1
+		for i := reqPrevLogIndex + 1; i < tail; i++ {
+			DPrintf("Delete server %d Log pos at %d, Logs:%v", rf.me, i, rf.Logs)
 			delete(rf.Logs, i)
 		}
 	}
@@ -321,6 +324,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 
 	reply.Success = true
+	DPrintf("Server %d show rf.Logs length is %d", rf.me, len(rf.Logs))
 	reply.LastIndex = len(rf.Logs)
 	rf.election_timer.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
 
@@ -410,7 +414,7 @@ Wait_Reply_Loop:
 		select {
 		case aer = <-aerChan:
 			rf.mu.Lock()
-			DPrintf("Leader %d already send appendentry to server %d", rf.me, i)
+			DPrintf("Leader %d already send appendentry to server %d", rf.me, aer.Id)
 			appendCurTerm := aer.Term
 			appendSuccess := aer.Success
 			appendIndex := aer.LastIndex
@@ -428,7 +432,9 @@ Wait_Reply_Loop:
 				}
 
 				// log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-				rf.NextIndex[appendId] -= 1
+				if appendIndex > 0 {
+					rf.NextIndex[appendId] = Max(1, rf.NextIndex[appendId]-1)
+				}
 
 			} else {
 				rf.NextIndex[appendId] = appendIndex + 1
@@ -592,8 +598,8 @@ func (rf *Raft) trySendHeartBeat(c *sync.Cond) {
 
 		// Send AppendEntry
 		aerChan := rf.sendAEs(curTerm, commitIndex)
-		c.L.Unlock()
 		go rf.checkCommitted(aerChan)
+		c.L.Unlock()
 
 		time.Sleep(100 * time.Millisecond)
 	}
