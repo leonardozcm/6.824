@@ -282,30 +282,33 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 
 	// 2B append logs
+	// Check: Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+	reqPrevLogIndex := args.PrevLogIndex
+	reqPrevLogTerm := args.PrevLogTerm
+	if checkedLog, ok := rf.Logs[reqPrevLogIndex]; !ok && checkedLog.Term != reqPrevLogTerm {
+		reply.Term = rf.CurrentTerm
+		reply.LastIndex = len(rf.Logs)
+		reply.Success = false
+		return
+	}
+
+	// Check: If an existing entry conflicts with a new one (same index but different terms),
+	// delete the existing entry and all that follow it
+	args_Term := -1
 	if len(args.Entries) > 0 {
-		// Check: Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-		reqPrevLogIndex := args.PrevLogIndex
-		reqPrevLogTerm := args.PrevLogTerm
-		if checkedLog, ok := rf.Logs[reqPrevLogIndex]; !ok && checkedLog.Term != reqPrevLogTerm {
-			reply.Term = rf.CurrentTerm
-			reply.LastIndex = len(rf.Logs)
-			reply.Success = false
-			return
-		}
+		args_Term = args.Entries[0].Term
+	}
 
-		// Check: If an existing entry conflicts with a new one (same index but different terms),
-		// delete the existing entry and all that follow it
-		if checkedLog, ok := rf.Logs[reqPrevLogIndex+1]; ok && checkedLog.Term != args.Entries[0].Term {
-			DPrintf("Server %d has existing entry at index %d (value %v) conflicts with a new one(%v)", rf.me, reqPrevLogIndex+1, rf.Logs[reqPrevLogIndex+1], args.Entries[0])
-			for i := reqPrevLogIndex + 1; i < len(rf.Logs)+1; i++ {
-				delete(rf.Logs, i)
-			}
+	if checkedLog, ok := rf.Logs[reqPrevLogIndex+1]; ok && checkedLog.Term != args_Term {
+		DPrintf("Server %d has existing entry at index %d (value %v) conflicts with a new one", rf.me, reqPrevLogIndex+1, rf.Logs[reqPrevLogIndex+1])
+		for i := reqPrevLogIndex + 1; i < len(rf.Logs)+1; i++ {
+			delete(rf.Logs, i)
 		}
+	}
 
-		// TODO: For Now Assume there only contains one entry in the list
-		for _, entry := range args.Entries {
-			rf.Logs[reqPrevLogIndex+1] = entry
-		}
+	// TODO: For Now Assume there only contains one entry in the list
+	for _, entry := range args.Entries {
+		rf.Logs[reqPrevLogIndex+1] = entry
 	}
 
 	if args.LeaderCommit > rf.CommitIndex {
