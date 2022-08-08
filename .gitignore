@@ -6,3 +6,4 @@ mr-*
 mrmaster
 mrsequential
 mrworker
+*.txt
