@@ -191,6 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.CurrentTerm
 		DPrintf("Server %d do not vote for %d, len(rf.logs) is %d, args.LastLogTerm is %d, args.LastLogIndex is %d",
 			rf.me, candidateId, len(rf.Logs), args.LastLogTerm, args.LastLogIndex)
+		rf.CurrentTerm = Max(rf.CurrentTerm, candidateTerm)
 		return
 	}
 
@@ -286,11 +287,13 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	// Check: Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	reqPrevLogIndex := args.PrevLogIndex
 	reqPrevLogTerm := args.PrevLogTerm
-	if checkedLog, ok := rf.Logs[reqPrevLogIndex]; ok && checkedLog.Term != reqPrevLogTerm {
+	if checkedLog, ok := rf.Logs[reqPrevLogIndex]; reqPrevLogIndex != 0 && !ok || (ok && checkedLog.Term != reqPrevLogTerm) {
 		reply.Term = rf.CurrentTerm
 		reply.LastIndex = len(rf.Logs)
 		reply.Success = false
 		return
+	} else {
+		DPrintf("Server %d checklog status %v", rf.me, ok)
 	}
 
 	// Check: If an existing entry conflicts with a new one (same index but different terms),
@@ -320,6 +323,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	if rf.CommitIndex > rf.LastApplied {
 		rf.LastApplied += 1
+		DPrintf("Server %d apply index %d, commited index is %d", rf.me, rf.LastApplied, rf.CommitIndex)
 		rf.applyCh <- ApplyMsg{true, rf.Logs[rf.LastApplied].Command, rf.LastApplied}
 	}
 
