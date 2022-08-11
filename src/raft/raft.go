@@ -18,10 +18,12 @@ package raft
 //
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
 
@@ -115,34 +117,44 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	labgob.Register(map[int]LogEntry{})
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VoteFor)
+	e.Encode(rf.Logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	var currentTerm = 0
+	var voteFor = -1
+	var logs = make(map[int]LogEntry)
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.CurrentTerm = currentTerm
+		rf.VoteFor = voteFor
+		rf.Logs = logs
 		return
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	labgob.Register(map[int]LogEntry{})
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&voteFor) != nil ||
+		d.Decode(&logs) != nil {
+		DPrintf("Error: Fail to load status from exiting persisted states.")
+	} else {
+		DPrintf("Status Loaded, CurrentTerm %d, voteFor %d, logs %v", currentTerm, voteFor, logs)
+		rf.CurrentTerm = currentTerm
+		rf.VoteFor = voteFor
+		rf.Logs = logs
+	}
 }
 
 //
@@ -192,6 +204,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("Server %d do not vote for %d, len(rf.logs) is %d, args.LastLogTerm is %d, args.LastLogIndex is %d",
 			rf.me, candidateId, len(rf.Logs), args.LastLogTerm, args.LastLogIndex)
 		rf.CurrentTerm = Max(rf.CurrentTerm, candidateTerm)
+
+		rf.persist()
+
 		return
 	}
 
@@ -201,6 +216,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.VoteFor = candidateId
 	rf.election_timer.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
 	DPrintf("Server %d vote for %d", rf.me, candidateId)
+
+	rf.persist()
 
 }
 
@@ -281,6 +298,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 		// in case it's a candidate or old leader
 		rf.Status = Follower
+		rf.persist()
 	}
 
 	// 2B append logs
@@ -306,7 +324,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if checkedLog, ok := rf.Logs[reqPrevLogIndex+1]; ok && checkedLog.Term != args_Term {
 		DPrintf("Server %d has existing entry at index %d (value %v) conflicts with a new one", rf.me, reqPrevLogIndex+1, rf.Logs[reqPrevLogIndex+1])
 		tail := len(rf.Logs) + 1
-		for i := reqPrevLogIndex + 1; i < tail; i++ {
+		for i := tail - 1; i > reqPrevLogIndex; i-- {
 			DPrintf("Delete server %d Log pos at %d, Logs:%v", rf.me, i, rf.Logs)
 			delete(rf.Logs, i)
 		}
@@ -319,6 +337,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		rf.Logs[iter] = entry
 		iter += 1
 	}
+	rf.persist()
 
 	if args.LeaderCommit > rf.CommitIndex {
 		rf.CommitIndex = Min(args.LeaderCommit, len(rf.Logs))
@@ -373,6 +392,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = len(rf.Logs) + 1
 	// Append itself
 	rf.Logs[index] = LogEntry{term, command}
+	rf.persist()
 
 	return index, term, isLeader
 }
@@ -435,6 +455,7 @@ Wait_Reply_Loop:
 								for currentTerm is %d, appendCurTerm is %d`, rf.me, appendId, rf.CurrentTerm, appendCurTerm)
 					rf.CurrentTerm = appendCurTerm
 					rf.Status = Follower
+					rf.persist()
 					rf.mu.Unlock()
 					break Wait_Reply_Loop
 
@@ -454,6 +475,9 @@ Wait_Reply_Loop:
 
 			rf.mu.Unlock()
 		case <-time.After(200 * time.Millisecond):
+			if rf.killed() {
+				return
+			}
 			break Wait_Reply_Loop
 		}
 	}
@@ -527,6 +551,7 @@ func (rf *Raft) holdingElection(t *time.Timer, c *sync.Cond) {
 				if voteCurTerm > rf.CurrentTerm {
 					rf.Status = Follower
 					rf.CurrentTerm = voteCurTerm
+					rf.persist()
 					c.L.Unlock()
 					break Wait_Reply_Loop
 				}
@@ -538,6 +563,9 @@ func (rf *Raft) holdingElection(t *time.Timer, c *sync.Cond) {
 				c.L.Unlock()
 
 			case <-time.After(200 * time.Millisecond):
+				if rf.killed() {
+					return
+				}
 				break Wait_Reply_Loop
 			}
 		}
@@ -597,9 +625,11 @@ func (rf *Raft) trySendHeartBeat(c *sync.Cond) {
 			rf.CommitIndex = preCommitedIndex
 		}
 
-		if rf.CommitIndex > rf.LastApplied {
+		DPrintf("Leader %d committedIndex %d Lastapplied %d", rf.me, rf.CommitIndex, rf.LastApplied)
+		for rf.CommitIndex > rf.LastApplied {
 			rf.LastApplied += 1
 			rf.applyCh <- ApplyMsg{true, rf.Logs[rf.LastApplied].Command, rf.LastApplied}
+
 		}
 
 		curTerm := rf.CurrentTerm
@@ -639,13 +669,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// 2A: To implement most of the functions a raft serve must hold
 	rf.Status = Follower
-	rf.CurrentTerm = 0
-	rf.VoteFor = -1
+	// rf.CurrentTerm = 0
+	// rf.VoteFor = -1
 
 	// 2B: Init Log apply and commit index
 	rf.LastApplied = 0
 	rf.CommitIndex = 0
-	rf.Logs = make(map[int]LogEntry)
+	// rf.Logs = make(map[int]LogEntry)
 	rf.NextIndex = make([]int, rf.n)
 	for i := 0; i < rf.n; i++ {
 		rf.NextIndex[i] = 1

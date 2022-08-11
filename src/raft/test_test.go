@@ -765,6 +765,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 
 	wg.Wait()
 
+	DPrintf("wait Group exit, start sending 100")
 	cfg.one(100, servers, true)
 
 	cfg.end()
