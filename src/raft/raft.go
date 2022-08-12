@@ -131,13 +131,13 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	var currentTerm = 0
-	var voteFor = -1
-	var logs = make(map[int]LogEntry)
+	var currentTerm int
+	var voteFor int
+	var logs map[int]LogEntry
 	if data == nil || len(data) < 1 { // bootstrap without any state?
-		rf.CurrentTerm = currentTerm
-		rf.VoteFor = voteFor
-		rf.Logs = logs
+		rf.CurrentTerm = 0
+		rf.VoteFor = -1
+		rf.Logs = make(map[int]LogEntry)
 		return
 	}
 	// Your code here (2C).
@@ -271,10 +271,23 @@ type LogEntry struct {
 }
 
 type AppendEntryReply struct {
-	Term      int
-	Id        int
-	LastIndex int
-	Success   bool
+	Term                   int
+	Id                     int
+	LastIndex              int
+	Success                bool
+	FirstIndexOfFailedTerm int
+	FailedTerm             int
+}
+
+func (rf *Raft) GetMinIndexOfTerm(term int) int {
+	minIndex := 1
+	for i := len(rf.Logs); i > 0; i-- {
+		if rf.Logs[i].Term < term {
+			minIndex = i + 1
+			break
+		}
+	}
+	return minIndex
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
@@ -290,6 +303,8 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Term = rf.CurrentTerm
 		reply.LastIndex = len(rf.Logs)
 		reply.Success = false
+		reply.FailedTerm = 0
+		reply.FirstIndexOfFailedTerm = 0
 		return
 	}
 
@@ -309,6 +324,13 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Term = rf.CurrentTerm
 		reply.LastIndex = len(rf.Logs)
 		reply.Success = false
+		// By the hint from 6.824, we search for the first index of conflicting Term
+		if reqPrevLogIndex != 0 && !ok {
+			reply.FailedTerm = Max(rf.Logs[len(rf.Logs)].Term, 1)
+		} else {
+			reply.FailedTerm = checkedLog.Term
+		}
+		reply.FirstIndexOfFailedTerm = rf.GetMinIndexOfTerm(reply.FailedTerm)
 		return
 	} else {
 		DPrintf("Server %d checklog status %v", rf.me, ok)
@@ -316,16 +338,16 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	// Check: If an existing entry conflicts with a new one (same index but different terms),
 	// delete the existing entry and all that follow it
-	args_Term := -1
-	if len(args.Entries) > 0 {
-		args_Term = args.Entries[0].Term
-	}
+	// args_Term := -1
+	// if len(args.Entries) > 0 {
+	// 	args_Term = args.Entries[0].Term
+	// }
 
-	if checkedLog, ok := rf.Logs[reqPrevLogIndex+1]; ok && checkedLog.Term != args_Term {
+	if _, ok := rf.Logs[reqPrevLogIndex+1]; ok {
 		DPrintf("Server %d has existing entry at index %d (value %v) conflicts with a new one", rf.me, reqPrevLogIndex+1, rf.Logs[reqPrevLogIndex+1])
 		tail := len(rf.Logs) + 1
 		for i := tail - 1; i > reqPrevLogIndex; i-- {
-			DPrintf("Delete server %d Log pos at %d, Logs:%v", rf.me, i, rf.Logs)
+			// DPrintf("Delete server %d Log pos at %d, Logs:%v", rf.me, i, rf.Logs)
 			delete(rf.Logs, i)
 		}
 	}
@@ -429,8 +451,8 @@ func (rf *Raft) sendAEs(curTerm int, commitIndex int) chan AppendEntryReply {
 				ch <- aer
 
 			}(i, aerChan)
-			DPrintf("Leader %d at loop %d send logentry %v to server %d, nextIndex %d, lastLogIndex %d", rf.me, rf.Loop,
-				AppendEntryArgs{curTerm, rf.me, preLogIndex, preLogTerm, logs, commitIndex}, i, nextIndex, lastLogIndex)
+			// DPrintf("Leader %d at loop %d send logentry %v to server %d, nextIndex %d, lastLogIndex %d", rf.me, rf.Loop,
+			// 	AppendEntryArgs{curTerm, rf.me, preLogIndex, preLogTerm, logs, commitIndex}, i, nextIndex, lastLogIndex)
 		}
 	}
 	return aerChan
@@ -443,11 +465,11 @@ Wait_Reply_Loop:
 		select {
 		case aer = <-aerChan:
 			rf.mu.Lock()
-			DPrintf("Leader %d already send appendentry to server %d", rf.me, aer.Id)
 			appendCurTerm := aer.Term
 			appendSuccess := aer.Success
 			appendIndex := aer.LastIndex
 			appendId := aer.Id
+			DPrintf("Leader %d already send appendentry to server %d, answer is %+v", rf.me, aer.Id, aer)
 
 			if !appendSuccess {
 				if rf.CurrentTerm < appendCurTerm {
@@ -462,8 +484,8 @@ Wait_Reply_Loop:
 				}
 
 				// log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-				if appendIndex > 0 {
-					rf.NextIndex[appendId] = Max(1, rf.NextIndex[appendId]-1)
+				if aer.FailedTerm != 0 {
+					rf.NextIndex[appendId] = Max(1, aer.FirstIndexOfFailedTerm)
 				}
 
 			} else {
@@ -497,6 +519,7 @@ Wait_Reply_Loop:
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	DPrintf("Server %d was killed", rf.me)
 }
 
 func (rf *Raft) killed() bool {
