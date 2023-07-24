@@ -13,7 +13,7 @@ import (
 	"../raft"
 )
 
-const Debug = 0
+const Debug = 1
 const KVRAFT_LOG_HEAD = "Kvraft head --- "
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -44,7 +44,7 @@ type KVServer struct {
 
 	// Your definitions here.
 	kvMap         map[string]string
-	lastProcessId map[string]int64
+	lastProcessId map[string][2]interface{}
 }
 
 func (kv *KVServer) extractClientID(value string) (string, int64) {
@@ -56,6 +56,16 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
+	clientId, commandId := kv.extractClientID(args.CommandId)
+	if kv.lastProcessId[clientId][0] != nil &&
+		kv.lastProcessId[clientId][0].(int64) >= commandId {
+		DPrintf("Get kv.lastProcessId[clientId]: %d, commandId %v", kv.lastProcessId[clientId], commandId)
+		reply_stored := kv.lastProcessId[clientId][1].(GetReply)
+		reply.Err = reply_stored.Err
+		reply.Value = reply_stored.Value
+		return
+	}
 
 	op := Op{"Get", args.CommandId, args.Key, ""}
 	_, _, isLeader := kv.rf.Start(op)
@@ -69,6 +79,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Err = ErrNoKey
 		}
+		kv.lastProcessId[clientId] = [2]interface{}{commandId, GetReply{reply.Err, reply.Value}}
 	}
 }
 
@@ -79,8 +90,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	// DPrintf("PutAppend: %v", args)
 	clientId, commandId := kv.extractClientID(args.CommandId)
-	if kv.lastProcessId[clientId] >= commandId {
-		DPrintf("kv.lastProcessId[clientId]: %d, commandId %v", kv.lastProcessId[clientId], commandId)
+	if kv.lastProcessId[clientId][0] != nil &&
+		kv.lastProcessId[clientId][0].(int64) >= commandId {
+		DPrintf("PutAppend kv.lastProcessId[clientId]: %d, commandId %v", kv.lastProcessId[clientId], commandId)
 		reply.Err = OK
 		return
 	}
@@ -99,9 +111,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		case "Append":
 			kv.kvMap[applyMsg.Command.(Op).Key] += applyMsg.Command.(Op).Value
 		}
-		kv.lastProcessId[clientId] = commandId
-		DPrintf("Leader %d Success in %s", kv.me, applyMsg.Command.(Op).Key)
 		reply.Err = OK
+		kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
+		DPrintf("Leader %d Success in %s", kv.me, applyMsg.Command.(Op).Key)
 	}
 }
 
@@ -115,14 +127,24 @@ func (kv *KVServer) ProcessOpsInTime(t *time.Timer) {
 			kv.mu.Lock()
 			DPrintf("Server %d get for applyCh %v", kv.me, applyMsg)
 
+			clientId, commandId := kv.extractClientID(applyMsg.Command.(Op).CommandId)
 			switch applyMsg.Command.(Op).Op_name {
 			case "Put":
 				kv.kvMap[applyMsg.Command.(Op).Key] = applyMsg.Command.(Op).Value
+				kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
 			case "Append":
 				kv.kvMap[applyMsg.Command.(Op).Key] += applyMsg.Command.(Op).Value
+				kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
+			case "Get":
+				reply := GetReply{}
+				if value, ok := kv.kvMap[applyMsg.Command.(Op).Key]; ok {
+					reply.Value = value
+					reply.Err = OK
+				} else {
+					reply.Err = ErrNoKey
+				}
+				kv.lastProcessId[clientId] = [2]interface{}{commandId, reply}
 			}
-			clientId, commandId := kv.extractClientID(applyMsg.Command.(Op).CommandId)
-			kv.lastProcessId[clientId] = commandId
 			DPrintf("Server %d process op %v", kv.me, applyMsg.Command.(Op))
 			kv.mu.Unlock()
 		case <-t.C:
@@ -180,7 +202,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.kvMap = map[string]string{}
-	kv.lastProcessId = map[string]int64{}
+	kv.lastProcessId = make(map[string][2]interface{})
 
 	// You may need initialization code here.
 	process_timer := time.NewTimer(100 * time.Millisecond)

@@ -98,7 +98,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		DPrintf("Sending %v to server %d.", args, ck.leaderIndex)
 		if ok := ck.servers[ck.leaderIndex].Call("KVServer.PutAppend", &args, &reply); ok {
 			// Err: Wrong leader
-			DPrintf("Reply: %v", reply)
+			DPrintf("Reply: %v, Command %v", reply, args)
 			if reply.Err == OK {
 				DPrintf("Client Success in %s / %s / %s", op, key, value)
 				return

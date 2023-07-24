@@ -8,7 +8,7 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 )
 
-const Clerk_Req_During = 200 * time.Millisecond
+const Clerk_Req_During = 50 * time.Millisecond
 const KvServer_TimeOut = 10 * time.Millisecond
 
 type Err string
