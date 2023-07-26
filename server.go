@@ -113,7 +113,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 		reply.Err = OK
 		kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
-		DPrintf("Leader %d Success in %s", kv.me, applyMsg.Command.(Op).Key)
+		DPrintf("Leader %d Success in %v", kv.me, applyMsg.Command.(Op))
 	}
 }
 
@@ -148,7 +148,7 @@ func (kv *KVServer) ProcessOpsInTime(t *time.Timer) {
 			DPrintf("Server %d process op %v", kv.me, applyMsg.Command.(Op))
 			kv.mu.Unlock()
 		case <-t.C:
-			t.Reset(100 * time.Millisecond)
+			t.Reset(50 * time.Millisecond)
 		}
 	}
 }

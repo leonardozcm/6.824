@@ -558,6 +558,7 @@ func TestOnePartition3A(t *testing.T) {
 	cfg.ConnectClient(ckp2b, cfg.All())
 
 	time.Sleep(electionTimeout)
+	DPrintf("Main Process asleep")
 
 	select {
 	case <-done0:

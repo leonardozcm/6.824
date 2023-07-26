@@ -100,7 +100,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			// Err: Wrong leader
 			DPrintf("Reply: %v, Command %v", reply, args)
 			if reply.Err == OK {
-				DPrintf("Client Success in %s / %s / %s", op, key, value)
+				DPrintf("Client %s Success in %s / %s / %s", ck.clientId, op, key, value)
 				return
 			} else if reply.Err == ErrWrongLeader {
 				ck.leaderIndex = ck.RandomSelectServer()
