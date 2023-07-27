@@ -68,11 +68,27 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	op := Op{"Get", args.CommandId, args.Key, ""}
-	_, _, isLeader := kv.rf.Start(op)
+	_, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 	} else {
-		<-kv.applyCh
+		applyMsg := <-kv.applyCh
+		for applyMsg.Command.(Op).CommandId != args.CommandId {
+			DPrintf("Leader %d Fail in %v, process last ones, appterm vs. term is %d:%d. State is %d",
+				kv.me, applyMsg.Command.(Op), applyMsg.Term, term)
+			kv.processOps(applyMsg)
+			if applyMsg.Term > term {
+				reply.Err = ErrWrongLeader
+				return
+			}
+			select {
+			case applyMsg = <-kv.applyCh:
+				continue
+			case <-time.After(100 * time.Millisecond):
+				reply.Err = ErrWrongLeader
+				return
+			}
+		}
 		if value, ok := kv.kvMap[args.Key]; ok {
 			reply.Value = value
 			reply.Err = OK
@@ -88,7 +104,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	// DPrintf("PutAppend: %v", args)
+	DPrintf("Server %d start PutAppend: %v", kv.me, args)
 	clientId, commandId := kv.extractClientID(args.CommandId)
 	if kv.lastProcessId[clientId][0] != nil &&
 		kv.lastProcessId[clientId][0].(int64) >= commandId {
@@ -98,13 +114,33 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	op := Op{args.Op, args.CommandId, args.Key, args.Value}
-	_, _, isLeader := kv.rf.Start(op)
+	DPrintf("Server %d start", kv.me)
+	_, term, isLeader := kv.rf.Start(op)
+	DPrintf("Server %d start Over", kv.me)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 	} else {
 		DPrintf("Send to leader %d, ", kv.me)
 		// success apply get to state machine
 		applyMsg := <-kv.applyCh
+
+		for applyMsg.Command.(Op).CommandId != args.CommandId {
+			DPrintf("Leader %d Fail in %v, process last ones, appterm vs. term is %d:%d",
+				kv.me, applyMsg.Command.(Op), applyMsg.Term, term)
+			kv.processOps(applyMsg)
+			if applyMsg.Term > term {
+				reply.Err = ErrWrongLeader
+				return
+			}
+			select {
+			case applyMsg = <-kv.applyCh:
+				continue
+			case <-time.After(100 * time.Millisecond):
+				reply.Err = ErrWrongLeader
+				return
+			}
+		}
+
 		switch applyMsg.Command.(Op).Op_name {
 		case "Put":
 			kv.kvMap[applyMsg.Command.(Op).Key] = applyMsg.Command.(Op).Value
@@ -114,7 +150,33 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = OK
 		kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
 		DPrintf("Leader %d Success in %v", kv.me, applyMsg.Command.(Op))
+
 	}
+}
+
+func (kv *KVServer) processOps(applyMsg raft.ApplyMsg) {
+	DPrintf("Server %d get for applyCh %v", kv.me, applyMsg)
+
+	clientId, commandId := kv.extractClientID(applyMsg.Command.(Op).CommandId)
+	switch applyMsg.Command.(Op).Op_name {
+	case "Put":
+		kv.kvMap[applyMsg.Command.(Op).Key] = applyMsg.Command.(Op).Value
+		kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
+	case "Append":
+		kv.kvMap[applyMsg.Command.(Op).Key] += applyMsg.Command.(Op).Value
+		kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
+	case "Get":
+		reply := GetReply{}
+		if value, ok := kv.kvMap[applyMsg.Command.(Op).Key]; ok {
+			reply.Value = value
+			reply.Err = OK
+		} else {
+			reply.Err = ErrNoKey
+		}
+		kv.lastProcessId[clientId] = [2]interface{}{commandId, reply}
+	}
+	DPrintf("Server %d process op %v", kv.me, applyMsg.Command.(Op))
+
 }
 
 func (kv *KVServer) ProcessOpsInTime(t *time.Timer) {
@@ -124,28 +186,9 @@ func (kv *KVServer) ProcessOpsInTime(t *time.Timer) {
 	for {
 		select {
 		case applyMsg = <-kv.applyCh:
+			DPrintf("Server %d process op %v in the background", kv.me, applyMsg.Command.(Op))
 			kv.mu.Lock()
-			DPrintf("Server %d get for applyCh %v", kv.me, applyMsg)
-
-			clientId, commandId := kv.extractClientID(applyMsg.Command.(Op).CommandId)
-			switch applyMsg.Command.(Op).Op_name {
-			case "Put":
-				kv.kvMap[applyMsg.Command.(Op).Key] = applyMsg.Command.(Op).Value
-				kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
-			case "Append":
-				kv.kvMap[applyMsg.Command.(Op).Key] += applyMsg.Command.(Op).Value
-				kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
-			case "Get":
-				reply := GetReply{}
-				if value, ok := kv.kvMap[applyMsg.Command.(Op).Key]; ok {
-					reply.Value = value
-					reply.Err = OK
-				} else {
-					reply.Err = ErrNoKey
-				}
-				kv.lastProcessId[clientId] = [2]interface{}{commandId, reply}
-			}
-			DPrintf("Server %d process op %v", kv.me, applyMsg.Command.(Op))
+			kv.processOps(applyMsg)
 			kv.mu.Unlock()
 		case <-t.C:
 			t.Reset(50 * time.Millisecond)

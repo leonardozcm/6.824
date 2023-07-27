@@ -518,6 +518,7 @@ func TestOnePartition3A(t *testing.T) {
 	ckp1 := cfg.makeClient(p1)  // connect ckp1 to p1
 	ckp2a := cfg.makeClient(p2) // connect ckp2a to p2
 	ckp2b := cfg.makeClient(p2) // connect ckp2b to p2
+	DPrintf("make partition %v:%v", p1, p2)
 
 	Put(cfg, ckp1, "1", "14")
 	check(cfg, t, ckp1, "1", "14")
@@ -558,13 +559,13 @@ func TestOnePartition3A(t *testing.T) {
 	cfg.ConnectClient(ckp2b, cfg.All())
 
 	time.Sleep(electionTimeout)
-	DPrintf("Main Process asleep")
 
 	select {
 	case <-done0:
 	case <-time.After(30 * 100 * time.Millisecond):
 		t.Fatalf("Put did not complete")
 	}
+	DPrintf("PUT Process success")
 
 	select {
 	case <-done1:

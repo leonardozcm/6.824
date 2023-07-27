@@ -106,6 +106,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ck.leaderIndex = ck.RandomSelectServer()
 			}
 		} else {
+			DPrintf("Client %s Fail in %s / %s / %s, schdule re send", ck.clientId, op, key, value)
 			ck.leaderIndex = ck.RandomSelectServer()
 		}
 		time.Sleep(Clerk_Req_During)
