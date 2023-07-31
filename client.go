@@ -49,7 +49,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) RandomSelectServer() int {
-	return int(nrand()) % (len(ck.servers))
+	return int(ck.leaderIndex+1) % (len(ck.servers))
 }
 
 func (ck *Clerk) Get(key string) string {
@@ -59,13 +59,11 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{key, ck.clientId + " " + getUUID()}
 
 	for {
+		DPrintf("Client start getting args %v to %d", args, ck.leaderIndex)
 		if ok := ck.servers[ck.leaderIndex].Call("KVServer.Get", &args, &reply); ok {
-			if reply.Err == ErrWrongLeader {
-				ck.leaderIndex = ck.RandomSelectServer()
-			} else {
+			if reply.Err == OK || reply.Err == ErrNoKey {
 				return reply.Value
 			}
-		} else {
 			ck.leaderIndex = ck.RandomSelectServer()
 		}
 		time.Sleep(Clerk_Req_During)
@@ -95,7 +93,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		// DPrintf("args: %v", args)
 		// DPrintf("ck sending %d to %s %s %s\n", ck.leaderId, op, key, value)
-		DPrintf("Sending %v to server %d.", args, ck.leaderIndex)
+		DPrintf("Sending %v.", args)
 		if ok := ck.servers[ck.leaderIndex].Call("KVServer.PutAppend", &args, &reply); ok {
 			// Err: Wrong leader
 			DPrintf("Reply: %v, Command %v", reply, args)

@@ -13,10 +13,11 @@ import (
 	"../raft"
 )
 
-const Debug = 1
+const Debug = 0
 const KVRAFT_LOG_HEAD = "Kvraft head --- "
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
+	log.SetFlags(log.Lmicroseconds)
 	if Debug > 0 {
 		log.Printf(KVRAFT_LOG_HEAD+format, a...)
 	}
@@ -44,7 +45,8 @@ type KVServer struct {
 
 	// Your definitions here.
 	kvMap         map[string]string
-	lastProcessId map[string][2]interface{}
+	waitChan      map[string]chan Op
+	lastProcessId map[string]int64
 }
 
 func (kv *KVServer) extractClientID(value string) (string, int64) {
@@ -54,128 +56,121 @@ func (kv *KVServer) extractClientID(value string) (string, int64) {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
-	clientId, commandId := kv.extractClientID(args.CommandId)
-	if kv.lastProcessId[clientId][0] != nil &&
-		kv.lastProcessId[clientId][0].(int64) >= commandId {
-		DPrintf("Get kv.lastProcessId[clientId]: %d, commandId %v", kv.lastProcessId[clientId], commandId)
-		reply_stored := kv.lastProcessId[clientId][1].(GetReply)
-		reply.Err = reply_stored.Err
-		reply.Value = reply_stored.Value
-		return
-	}
-
+	DPrintf("Server %d start Get: %v", kv.me, args)
 	op := Op{"Get", args.CommandId, args.Key, ""}
-	_, term, isLeader := kv.rf.Start(op)
+	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		DPrintf("Server %d Wrong Leader", kv.me)
 	} else {
-		applyMsg := <-kv.applyCh
-		for applyMsg.Command.(Op).CommandId != args.CommandId {
-			DPrintf("Leader %d Fail in %v, process last ones, appterm vs. term is %d:%d. State is %d",
-				kv.me, applyMsg.Command.(Op), applyMsg.Term, term)
-			kv.processOps(applyMsg)
-			if applyMsg.Term > term {
-				reply.Err = ErrWrongLeader
-				return
+
+		kv.mu.Lock()
+		var opReply Op
+		opChan := make(chan Op, 1)
+		kv.waitChan[args.CommandId] = opChan
+		kv.mu.Unlock()
+
+		select {
+		case opReply = <-opChan:
+			kv.delOpChan(args.CommandId)
+			if opReply.Value == ErrNoKey {
+				reply.Err = ErrNoKey
+			} else {
+				reply.Value = opReply.Value
+				reply.Err = OK
 			}
-			select {
-			case applyMsg = <-kv.applyCh:
-				continue
-			case <-time.After(100 * time.Millisecond):
-				reply.Err = ErrWrongLeader
-				return
-			}
+			DPrintf("Leader %d Success in %v", kv.me, opReply)
+		case <-time.After(KvServer_TimeOut):
+			DPrintf("Leader %d Get time out", kv.me)
+			kv.delOpChan(args.CommandId)
+			reply.Err = ErrWrongLeader
 		}
-		if value, ok := kv.kvMap[args.Key]; ok {
-			reply.Value = value
-			reply.Err = OK
-		} else {
-			reply.Err = ErrNoKey
-		}
-		kv.lastProcessId[clientId] = [2]interface{}{commandId, GetReply{reply.Err, reply.Value}}
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 
 	DPrintf("Server %d start PutAppend: %v", kv.me, args)
-	clientId, commandId := kv.extractClientID(args.CommandId)
-	if kv.lastProcessId[clientId][0] != nil &&
-		kv.lastProcessId[clientId][0].(int64) >= commandId {
-		DPrintf("PutAppend kv.lastProcessId[clientId]: %d, commandId %v", kv.lastProcessId[clientId], commandId)
-		reply.Err = OK
-		return
-	}
 
 	op := Op{args.Op, args.CommandId, args.Key, args.Value}
-	DPrintf("Server %d start", kv.me)
-	_, term, isLeader := kv.rf.Start(op)
-	DPrintf("Server %d start Over", kv.me)
+	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		DPrintf("Server %d Wrong Leader", kv.me)
 	} else {
 		DPrintf("Send to leader %d, ", kv.me)
 		// success apply get to state machine
-		applyMsg := <-kv.applyCh
-
-		for applyMsg.Command.(Op).CommandId != args.CommandId {
-			DPrintf("Leader %d Fail in %v, process last ones, appterm vs. term is %d:%d",
-				kv.me, applyMsg.Command.(Op), applyMsg.Term, term)
-			kv.processOps(applyMsg)
-			if applyMsg.Term > term {
-				reply.Err = ErrWrongLeader
-				return
-			}
-			select {
-			case applyMsg = <-kv.applyCh:
-				continue
-			case <-time.After(100 * time.Millisecond):
-				reply.Err = ErrWrongLeader
-				return
-			}
+		kv.mu.Lock()
+		opChan := make(chan Op, 1)
+		kv.waitChan[args.CommandId] = opChan
+		kv.mu.Unlock()
+		select {
+		case <-opChan:
+			kv.delOpChan(args.CommandId)
+			// reply Op success
+			reply.Err = OK
+			DPrintf("Leader %d Success in %v", kv.me, op)
+		case <-time.After(KvServer_TimeOut):
+			DPrintf("Leader %d PutAppend time out", kv.me)
+			kv.delOpChan(args.CommandId)
+			reply.Err = ErrWrongLeader
 		}
-
-		switch applyMsg.Command.(Op).Op_name {
-		case "Put":
-			kv.kvMap[applyMsg.Command.(Op).Key] = applyMsg.Command.(Op).Value
-		case "Append":
-			kv.kvMap[applyMsg.Command.(Op).Key] += applyMsg.Command.(Op).Value
-		}
-		reply.Err = OK
-		kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
-		DPrintf("Leader %d Success in %v", kv.me, applyMsg.Command.(Op))
-
 	}
 }
 
+func (kv *KVServer) delOpChan(commandId string) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	delete(kv.waitChan, commandId)
+}
+
+func (kv *KVServer) checkDuplicatedRequest(clientId string, commandId int64) bool {
+	if val, ok := kv.lastProcessId[clientId]; ok {
+		DPrintf("kv.lastProcessId[clientId]: %v, commandId %v", kv.lastProcessId[clientId], commandId)
+		return val == commandId
+	}
+	return false
+}
+
 func (kv *KVServer) processOps(applyMsg raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	DPrintf("Server %d get for applyCh %v", kv.me, applyMsg)
 
 	clientId, commandId := kv.extractClientID(applyMsg.Command.(Op).CommandId)
-	switch applyMsg.Command.(Op).Op_name {
-	case "Put":
-		kv.kvMap[applyMsg.Command.(Op).Key] = applyMsg.Command.(Op).Value
-		kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
-	case "Append":
-		kv.kvMap[applyMsg.Command.(Op).Key] += applyMsg.Command.(Op).Value
-		kv.lastProcessId[clientId] = [2]interface{}{commandId, PutAppendReply{Err: OK}}
-	case "Get":
-		reply := GetReply{}
-		if value, ok := kv.kvMap[applyMsg.Command.(Op).Key]; ok {
-			reply.Value = value
-			reply.Err = OK
-		} else {
-			reply.Err = ErrNoKey
+	replyOp := Op{Key: applyMsg.Command.(Op).Key,
+		Op_name:   applyMsg.Command.(Op).Op_name,
+		CommandId: applyMsg.Command.(Op).CommandId,
+		Value:     applyMsg.Command.(Op).Value}
+	if kv.checkDuplicatedRequest(clientId, commandId) {
+		DPrintf("Server %d do nothing when process a duplicated apply %v",
+			kv.me, applyMsg)
+	} else {
+		switch applyMsg.Command.(Op).Op_name {
+		case "Put":
+			kv.kvMap[applyMsg.Command.(Op).Key] = applyMsg.Command.(Op).Value
+			kv.lastProcessId[clientId] = commandId
+		case "Append":
+			kv.kvMap[applyMsg.Command.(Op).Key] += applyMsg.Command.(Op).Value
+			kv.lastProcessId[clientId] = commandId
+		case "Get":
 		}
-		kv.lastProcessId[clientId] = [2]interface{}{commandId, reply}
+		DPrintf("Server %d finshed process op %v", kv.me, applyMsg.Command.(Op))
 	}
-	DPrintf("Server %d process op %v", kv.me, applyMsg.Command.(Op))
+
+	if value, ok := kv.kvMap[applyMsg.Command.(Op).Key]; ok {
+		replyOp.Value = value
+	} else {
+		replyOp.Value = ""
+	}
+
+	if opChan, ok := kv.waitChan[applyMsg.Command.(Op).CommandId]; ok {
+		DPrintf("Server %d append %v.", kv.me, replyOp)
+		opChan <- replyOp
+		DPrintf("Server %d finish appending %v.", kv.me, replyOp)
+	}
 
 }
 
@@ -184,15 +179,10 @@ func (kv *KVServer) ProcessOpsInTime(t *time.Timer) {
 
 	var applyMsg raft.ApplyMsg
 	for {
-		select {
-		case applyMsg = <-kv.applyCh:
-			DPrintf("Server %d process op %v in the background", kv.me, applyMsg.Command.(Op))
-			kv.mu.Lock()
-			kv.processOps(applyMsg)
-			kv.mu.Unlock()
-		case <-t.C:
-			t.Reset(50 * time.Millisecond)
-		}
+		applyMsg = <-kv.applyCh
+		DPrintf("Server %d process op %v in the background", kv.me, applyMsg.Command.(Op))
+		kv.processOps(applyMsg)
+		DPrintf("Server %d process op %v in the background done", kv.me, applyMsg.Command.(Op))
 	}
 }
 
@@ -245,7 +235,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.kvMap = map[string]string{}
-	kv.lastProcessId = make(map[string][2]interface{})
+	kv.waitChan = map[string]chan Op{}
+	kv.lastProcessId = make(map[string]int64)
 
 	// You may need initialization code here.
 	process_timer := time.NewTimer(100 * time.Millisecond)
