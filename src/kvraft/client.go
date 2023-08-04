@@ -1,13 +1,23 @@
 package kvraft
 
-import "../labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"strconv"
+	"time"
 
+	"../labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderIndex int
+	clientId    string
+}
+
+func getUUID() string {
+	return strconv.FormatInt(time.Now().UnixNano(), 10)
 }
 
 func nrand() int64 {
@@ -21,6 +31,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.leaderIndex = ck.RandomSelectServer()
+	ck.clientId = strconv.FormatInt(nrand(), 10)
 	return ck
 }
 
@@ -36,10 +48,29 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 //
+func (ck *Clerk) RandomSelectServer() int {
+	return int(ck.leaderIndex+1) % (len(ck.servers))
+}
+
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	reply := GetReply{}
+	args := GetArgs{key, ck.clientId + " " + getUUID()}
+	DPrintf("Get args: %s ", key)
+	for {
+		DPrintf("Client %s start getting args %v", ck.clientId, args)
+		if ok := ck.servers[ck.leaderIndex].Call("KVServer.Get", &args, &reply); ok {
+			DPrintf("Client get reply %v", reply)
+			if reply.Err == OK {
+				return reply.Value
+			} else if reply.Err == ErrNoKey {
+				return ""
+			}
+		}
+		ck.leaderIndex = ck.RandomSelectServer()
+		time.Sleep(Clerk_Req_During)
+	}
 }
 
 //
@@ -54,6 +85,33 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	reply := PutAppendReply{}
+	DPrintf("Present args: %s / %s / %s", op, key, value)
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		CommandId: ck.clientId + " " + getUUID()}
+
+	for {
+		// DPrintf("args: %v", args)
+		// DPrintf("ck sending %d to %s %s %s\n", ck.leaderId, op, key, value)
+		DPrintf("Sending %v.", args)
+		if ok := ck.servers[ck.leaderIndex].Call("KVServer.PutAppend", &args, &reply); ok {
+			// Err: Wrong leader
+			DPrintf("Reply: %v, Command %v", reply, args)
+			if reply.Err == OK {
+				DPrintf("Client %s Success in %s / %s / %s", ck.clientId, op, key, value)
+				return
+			} else if reply.Err == ErrWrongLeader {
+				ck.leaderIndex = ck.RandomSelectServer()
+			}
+		} else {
+			DPrintf("Client %s Fail in %s / %s / %s, schdule re send", ck.clientId, op, key, value)
+			ck.leaderIndex = ck.RandomSelectServer()
+		}
+		time.Sleep(Clerk_Req_During)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

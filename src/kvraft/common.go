@@ -1,10 +1,15 @@
 package kvraft
 
+import "time"
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
 )
+
+const Clerk_Req_During = 20 * time.Millisecond
+const KvServer_TimeOut = 500 * time.Millisecond
 
 type Err string
 
@@ -16,18 +21,23 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	CommandId string
 }
 
 type PutAppendReply struct {
 	Err Err
+	// CommandId int
 }
 
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	CommandId string
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+
+	// CommandId int
 }
