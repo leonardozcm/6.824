@@ -1,17 +1,20 @@
 package kvraft
 
-import "../porcupine"
-import "../models"
-import "testing"
-import "strconv"
-import "time"
-import "math/rand"
-import "log"
-import "strings"
-import "sync"
-import "sync/atomic"
-import "fmt"
-import "io/ioutil"
+import (
+	"fmt"
+	"io/ioutil"
+	"log"
+	"math/rand"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"../models"
+	"../porcupine"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -438,7 +441,6 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 				fmt.Printf("info: wrote history visualization to %s\n", file.Name())
 			}
 		}
-		t.Fatal("history is not linearizable")
 		t.Fatal("history is not linearizable")
 	} else if res == porcupine.Unknown {
 		fmt.Println("info: linearizability check timed out, assuming history is ok")
