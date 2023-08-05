@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ import (
 	"../raft"
 )
 
-const Debug = 1
+const Debug = 0
 const KVRAFT_LOG_HEAD = "Kvraft head --- "
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -43,6 +44,7 @@ type KVServer struct {
 	stopCh  chan struct{}
 
 	maxraftstate int // snapshot if log grows this big
+	persister    raft.Persister
 
 	// Your definitions here.
 	kvMap         map[string]string
@@ -162,6 +164,9 @@ func (kv *KVServer) processOps(applyMsg raft.ApplyMsg) {
 		}
 	}
 
+	// detect if a snapshot should be executed
+	// kv.TrySaveSnapshot(applyMsg.CommandIndex)
+
 	if value, ok := kv.kvMap[applyMsg.Command.(Op).Key]; ok {
 		replyOp.Value = value
 	} else {
@@ -194,6 +199,55 @@ func (kv *KVServer) ProcessOpsInTime(t *time.Timer) {
 			kv.processOps(applyMsg)
 			DPrintf("Server %d process op %v in the background done", kv.me, applyMsg.Command.(Op))
 		}
+	}
+}
+
+func (kv *KVServer) TrySaveSnapshot(index int) {
+	// In case the raft logs states have reached the maxraftstate threshold
+	// , we need to save the snapshot and discard the old logs
+	if kv.persister.RaftStateSize() >= kv.maxraftstate && kv.maxraftstate != -1 {
+		kv.SaveSnapshot(index)
+	}
+
+}
+
+func (kv *KVServer) SaveSnapshot(index int) {
+	labgob.Register(Op{})
+	labgob.Register(map[string]string{})
+	labgob.Register(map[string]int64{})
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvMap)
+	e.Encode(kv.lastProcessId)
+	kvdata := w.Bytes()
+	kv.rf.AbandonPersistData(index)
+	rfdata := kv.rf.GetPersistDataSafe()
+	kv.persister.SaveStateAndSnapshot(rfdata, kvdata)
+}
+
+func (kv *KVServer) ReadSnapshot() {
+	labgob.Register(Op{})
+	labgob.Register(map[string]string{})
+	labgob.Register(map[string]int64{})
+
+	data := kv.persister.ReadSnapshot()
+
+	var kvMap map[string]string
+	var lastProcessId map[string]int64
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&kvMap) != nil ||
+		d.Decode(&lastProcessId) != nil {
+		DPrintf("Error: Fail to load status from exiting persisted states.")
+	} else {
+		DPrintf("Server %d Status Loaded", kv.me)
+		kv.kvMap = kvMap
+		kv.lastProcessId = lastProcessId
 	}
 }
 
@@ -237,6 +291,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(map[string]string{})
+	labgob.Register(map[string]int64{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -250,6 +306,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.kvMap = map[string]string{}
 	kv.waitChan = map[string]chan Op{}
 	kv.lastProcessId = make(map[string]int64)
+
+	// Read Persisted Data
+	// kv.ReadSnapshot()
 
 	// You may need initialization code here.
 	process_timer := time.NewTimer(100 * time.Millisecond)
