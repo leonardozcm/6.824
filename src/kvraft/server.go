@@ -13,7 +13,7 @@ import (
 	"../raft"
 )
 
-const Debug = 1
+const Debug = 0
 const KVRAFT_LOG_HEAD = "Kvraft head --- "
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
