@@ -80,6 +80,7 @@ type Raft struct {
 	Logs           map[int]LogEntry
 	applyCh        chan ApplyMsg
 	election_timer *time.Timer
+	apply_timer    *time.Timer
 	stopCh         chan bool
 
 	// Volatile state on all servers
@@ -195,6 +196,15 @@ func (rf *Raft) InstallSnapshot(arg *InstallSnapshotArgs, reply *AppendEntryRepl
 		rf.persist()
 	}
 
+	if rf.FirstUnsavedIndex > arg.LastIncludedIndex {
+		reply.Success = false
+		reply.LastIndex = rf.MaxLogIndex
+		reply.FailedTerm = 0
+		reply.FirstIndexOfFailedTerm = 0
+		rf.mu.Unlock()
+		return
+	}
+
 	abortEnd := rf.MaxLogIndex
 	DPrintf("Server %d show InstallSnapshot check rf.MaxLogIndex %d, arg.LastIncludedIndex %d, logs is %v", rf.me, rf.MaxLogIndex, arg.LastIncludedIndex, rf.Logs)
 	if log, ok := rf.Logs[arg.LastIncludedIndex]; ok && log.Term == arg.Term {
@@ -203,7 +213,7 @@ func (rf *Raft) InstallSnapshot(arg *InstallSnapshotArgs, reply *AppendEntryRepl
 	DPrintf("Server %d show InstallSnapshot abortEnd %d", rf.me, abortEnd)
 	rf.MaxLogIndex = arg.LastIncludedIndex
 	rf.CommitIndex = Max(rf.CommitIndex, arg.LastIncludedIndex)
-	rf.LastApplied = Max(rf.LastApplied, arg.LastIncludedIndex)
+	// rf.LastApplied = Max(rf.LastApplied, arg.LastIncludedIndex)
 	rf.LastIncludedTerm = arg.LastIncludedTerm
 
 	for i := rf.FirstUnsavedIndex; i <= abortEnd; i++ {
@@ -214,6 +224,7 @@ func (rf *Raft) InstallSnapshot(arg *InstallSnapshotArgs, reply *AppendEntryRepl
 	rf.Status = Follower
 	rfdata := rf.getPersistData()
 	rf.persister.SaveStateAndSnapshot(rfdata, arg.Data)
+	// rf.LastApplied = arg.LastIncludedIndex
 	rf.election_timer.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
 
 	reply.Success = true
@@ -223,7 +234,8 @@ func (rf *Raft) InstallSnapshot(arg *InstallSnapshotArgs, reply *AppendEntryRepl
 	DPrintf("Server %d show InstallSnapshot args %+v to leader %d", rf.me, reply, arg.LeaderId)
 
 	rf.mu.Unlock()
-	rf.applyCh <- ApplyMsg{false, nil, -1}
+	// rf.apply_timer.Reset(0)
+	// rf.applyCh <- ApplyMsg{false, nil, -1}
 }
 
 func (rf *Raft) sendSnapshot(server int, arg *InstallSnapshotArgs, reply *AppendEntryReply) bool {
@@ -518,11 +530,11 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		rf.CommitIndex = Min(args.LeaderCommit, rf.MaxLogIndex)
 	}
 
-	for rf.CommitIndex > rf.LastApplied {
-		rf.LastApplied += 1
-		DPrintf("Server %d apply index %d, commited index is %d", rf.me, rf.LastApplied, rf.CommitIndex)
-		rf.applyCh <- ApplyMsg{true, rf.Logs[rf.LastApplied].Command, rf.LastApplied}
-	}
+	// for rf.CommitIndex > rf.LastApplied {
+	// 	rf.LastApplied += 1
+	// 	DPrintf("Server %d apply index %d, commited index is %d", rf.me, rf.LastApplied, rf.CommitIndex)
+	// 	rf.applyCh <- ApplyMsg{true, rf.Logs[rf.LastApplied].Command, rf.LastApplied}
+	// }
 
 	reply.Success = true
 	DPrintf("Server %d show rf.Logs length is %d", rf.me, rf.MaxLogIndex)
@@ -530,7 +542,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.Status = Follower
 	rf.persist()
 	rf.election_timer.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
-
+	// rf.apply_timer.Reset(0)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
@@ -568,6 +580,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.MaxLogIndex += 1
 	// Append itself
 	rf.Logs[rf.MaxLogIndex] = LogEntry{term, command}
+	rf.sendHeartBeat()
 	rf.persist()
 
 	return rf.MaxLogIndex, term, isLeader
@@ -650,22 +663,16 @@ func (rf *Raft) checkApplies() {
 	}
 
 	// check if this log occurs in this term
+	DPrintf("Leader %d, rf.CommitIndex %d, preCommitedIndex %d", rf.me, rf.CommitIndex, preCommitedIndex)
 	if rf.Logs[preCommitedIndex].Term == rf.CurrentTerm {
 		rf.CommitIndex = preCommitedIndex
 		rf.persist()
-	}
-
-	DPrintf("Leader %d committedIndex %d Lastapplied %d", rf.me, rf.CommitIndex, rf.LastApplied)
-	for rf.CommitIndex > rf.LastApplied {
-		rf.LastApplied += 1
-		DPrintf("Leader %d at term %d apply msg %d, committedIndex %d, cap applyCh is %d", rf.me, rf.CurrentTerm, rf.LastApplied, rf.CommitIndex, cap(rf.applyCh))
-		rf.applyCh <- ApplyMsg{true, rf.Logs[rf.LastApplied].Command, rf.LastApplied}
-		DPrintf("Leader %d at term %d apply msg %d done", rf.me, rf.CurrentTerm, rf.LastApplied)
 	}
 }
 
 func (rf *Raft) checkCommitted(aerChan chan AppendEntryReply) {
 	var aer AppendEntryReply
+	success := 0
 Wait_Reply_Loop:
 	for i := 0; i < rf.n-1; i++ {
 		select {
@@ -696,12 +703,16 @@ Wait_Reply_Loop:
 				}
 
 			} else {
+				success += 1
 				rf.NextIndex[appendId] = appendIndex + 1
 				rf.MatchIndex[appendId] = appendIndex
 				DPrintf("Leader %d update Server %d status: MatchIndex %d", rf.me, appendId, appendIndex)
-				// if i == rf.n-1 && appendIndex > rf.CommitIndex {
-				// 	rf.checkApplies()
-				// }
+				DPrintf("Leader %d at i %d appendIndex %d, rf.CommitIndex %d", rf.me, i, appendIndex, rf.CommitIndex)
+
+				// trigger apply manually
+				if success == rf.n-1 && rf.CommitIndex < appendIndex {
+					// rf.apply_timer.Reset(0)
+				}
 			}
 
 			rf.mu.Unlock()
@@ -740,13 +751,13 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) holdingElection(t *time.Timer) {
+func (rf *Raft) holdingElection() {
 	for {
 		select {
 		case <-rf.stopCh:
 			DPrintf("Server %d stop holding election", rf.me)
 			return
-		case <-t.C:
+		case <-rf.election_timer.C:
 			DPrintf("Server %d election timesout, start a election.", rf.me)
 			// Start an Election
 
@@ -830,7 +841,7 @@ func (rf *Raft) holdingElection(t *time.Timer) {
 				DPrintf("Leader %d at term %d block to be waiting as a follower", rf.me, rf.CurrentTerm)
 				time.Sleep(100 * time.Millisecond)
 			}
-			t.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
+			rf.election_timer.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
 		}
 	}
 }
@@ -851,19 +862,64 @@ func (rf *Raft) trySendHeartBeat() {
 				continue
 			}
 
-			DPrintf("Leader %d start sending heartbeats.", rf.me)
-
-			// Update CommitedIndex
-			rf.checkApplies()
-
-			curTerm := rf.CurrentTerm
-			commitIndex := rf.CommitIndex
-
-			// Send AppendEntry
-			aerChan := rf.sendAEs(curTerm, commitIndex)
-			go rf.checkCommitted(aerChan)
+			rf.sendHeartBeat()
 			rf.mu.Unlock()
 		}
+	}
+}
+
+func (rf *Raft) sendHeartBeat() {
+	DPrintf("Leader %d start sending heartbeats.", rf.me)
+
+	curTerm := rf.CurrentTerm
+	commitIndex := rf.CommitIndex
+
+	// Send AppendEntry
+	aerChan := rf.sendAEs(curTerm, commitIndex)
+	go rf.checkCommitted(aerChan)
+
+}
+
+func (rf *Raft) applyMsg() {
+	for {
+		select {
+		case <-rf.stopCh:
+			DPrintf("Server % d stop applying msgs", rf.me)
+			return
+		case <-rf.apply_timer.C:
+			rf.sendMsg()
+			rf.apply_timer.Reset(100 * time.Millisecond)
+		}
+	}
+}
+
+func (rf *Raft) sendMsg() {
+	rf.mu.Lock()
+	rf.checkApplies()
+	msgs := make([]ApplyMsg, 0)
+	if rf.LastApplied < rf.FirstUnsavedIndex-1 {
+		msgs = append(msgs, ApplyMsg{
+			CommandValid: false,
+			Command:      "installSnapShot",
+			CommandIndex: rf.FirstUnsavedIndex - 1,
+		})
+	} else if rf.CommitIndex > rf.LastApplied {
+		for i := rf.LastApplied + 1; i <= rf.CommitIndex; i++ {
+			msgs = append(msgs, ApplyMsg{
+				CommandValid: true,
+				Command:      rf.Logs[i].Command,
+				CommandIndex: i,
+			})
+		}
+	}
+	rf.mu.Unlock()
+
+	for _, msg := range msgs {
+		rf.applyCh <- msg
+		DPrintf("Server %d apply msg %+v", rf.me, msg)
+		rf.mu.Lock()
+		rf.LastApplied = msg.CommandIndex
+		rf.mu.Unlock()
 	}
 }
 
@@ -912,6 +968,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.LastIncludedTerm = 0
 
 	rf.election_timer = time.NewTimer(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
+	rf.apply_timer = time.NewTimer(100 * time.Millisecond)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -920,10 +977,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	DPrintf(" Server %d init", rf.me)
 
 	// Election Management
-	go rf.holdingElection(rf.election_timer)
+	go rf.holdingElection()
 
 	// AppendEntries Function
 	go rf.trySendHeartBeat()
+
+	go rf.applyMsg()
 
 	return rf
 }
