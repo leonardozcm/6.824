@@ -189,6 +189,9 @@ func (kv *KVServer) processOps(applyMsg raft.ApplyMsg) {
 	DPrintf("Server %d finshed process op %v", kv.me, replyOp)
 	if opChan, ok := kv.waitChan[applyMsg.Command.(Op).CommandId]; ok {
 		DPrintf("Server %d append %v.", kv.me, replyOp)
+		if len(opChan) > 0 {
+			return
+		}
 		opChan <- replyOp
 		DPrintf("Server %d finish appending %v.", kv.me, replyOp)
 	}

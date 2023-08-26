@@ -130,7 +130,7 @@ func (rf *Raft) getPersistData() []byte {
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	DPrintf("Server %d persist data CurrentTerm %d, VoteFor %d, FirstUnsavedIndex %d, MaxLogIndex %d", rf.me, rf.CurrentTerm, rf.VoteFor, rf.FirstUnsavedIndex, rf.MaxLogIndex)
+	DPrintf("Server %d persist data CurrentTerm %d, VoteFor %d, FirstUnsavedIndex %d, MaxLogIndex %d, logs %v", rf.me, rf.CurrentTerm, rf.VoteFor, rf.FirstUnsavedIndex, rf.MaxLogIndex, rf.Logs)
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VoteFor)
 	e.Encode(rf.Logs)
@@ -153,6 +153,11 @@ func (rf *Raft) GetPersistDataSafe() []byte {
 func (rf *Raft) AbandonPersistData(index int, snapshotData []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	if rf.FirstUnsavedIndex >= index {
+		DPrintf("Server %d AbandonPersistData failed, rf.FirstUnsavedIndex %d, index %d", rf.me, rf.FirstUnsavedIndex, index)
+		return
+	}
 
 	rf.LastIncludedTerm = rf.Logs[index].Term
 	len_log := len(rf.Logs)
@@ -207,13 +212,12 @@ func (rf *Raft) InstallSnapshot(arg *InstallSnapshotArgs, reply *AppendEntryRepl
 
 	abortEnd := rf.MaxLogIndex
 	DPrintf("Server %d show InstallSnapshot check rf.MaxLogIndex %d, arg.LastIncludedIndex %d, logs is %v", rf.me, rf.MaxLogIndex, arg.LastIncludedIndex, rf.Logs)
-	if log, ok := rf.Logs[arg.LastIncludedIndex]; ok && log.Term == arg.Term {
+	if _, ok := rf.Logs[arg.LastIncludedIndex]; ok {
 		abortEnd = arg.LastIncludedIndex
 	}
 	DPrintf("Server %d show InstallSnapshot abortEnd %d", rf.me, abortEnd)
-	rf.MaxLogIndex = arg.LastIncludedIndex
+	rf.MaxLogIndex = Max(rf.MaxLogIndex, arg.LastIncludedIndex)
 	rf.CommitIndex = Max(rf.CommitIndex, arg.LastIncludedIndex)
-	// rf.LastApplied = Max(rf.LastApplied, arg.LastIncludedIndex)
 	rf.LastIncludedTerm = arg.LastIncludedTerm
 
 	for i := rf.FirstUnsavedIndex; i <= abortEnd; i++ {
@@ -500,13 +504,6 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		}
 	}
 
-	// Check: If an existing entry conflicts with a new one (same index but different terms),
-	// delete the existing entry and all that follow it
-	// args_Term := -1
-	// if len(args.Entries) > 0 {
-	// 	args_Term = args.Entries[0].Term
-	// }
-
 	if _, ok := rf.Logs[reqPrevLogIndex+1]; ok {
 		DPrintf("Server %d has existing entry at index %d (value %+v) conflicts with a new one", rf.me, reqPrevLogIndex+1, rf.Logs[reqPrevLogIndex+1])
 		for i := rf.MaxLogIndex; i > reqPrevLogIndex; i-- {
@@ -528,13 +525,8 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	if args.LeaderCommit > rf.CommitIndex {
 		rf.CommitIndex = Min(args.LeaderCommit, rf.MaxLogIndex)
+		// rf.apply_timer.Reset(0)
 	}
-
-	// for rf.CommitIndex > rf.LastApplied {
-	// 	rf.LastApplied += 1
-	// 	DPrintf("Server %d apply index %d, commited index is %d", rf.me, rf.LastApplied, rf.CommitIndex)
-	// 	rf.applyCh <- ApplyMsg{true, rf.Logs[rf.LastApplied].Command, rf.LastApplied}
-	// }
 
 	reply.Success = true
 	DPrintf("Server %d show rf.Logs length is %d", rf.me, rf.MaxLogIndex)
@@ -542,7 +534,6 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.Status = Follower
 	rf.persist()
 	rf.election_timer.Reset(RandDuringGenerating(election_wait_l, election_wait_r) * time.Millisecond)
-	// rf.apply_timer.Reset(0)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
@@ -596,14 +587,17 @@ func (rf *Raft) sendAEs(curTerm int, commitIndex int) chan AppendEntryReply {
 			if rf.FirstUnsavedIndex > rf.NextIndex[i] {
 				// if false {
 				DPrintf("Server %d to server %d rf.FirstUnsavedIndex > rf.NextIndex[i]: %d vs %d", rf.me, i, rf.FirstUnsavedIndex, rf.NextIndex[i])
+				LastIncludedIndex := rf.FirstUnsavedIndex - 1
+				LastIncludedTerm := rf.LastIncludedTerm
+				data := rf.persister.ReadSnapshot()
 				go func(i int, ch chan AppendEntryReply) {
 					rf.sendSnapshot(i,
 						&InstallSnapshotArgs{
 							curTerm,
 							rf.me,
-							rf.FirstUnsavedIndex - 1,
-							rf.LastIncludedTerm,
-							rf.persister.ReadSnapshot()},
+							LastIncludedIndex,
+							LastIncludedTerm,
+							data},
 						&aer)
 					DPrintf("Server %d send snapshot to server %d, rf.FirstUnsavedIndex > rf.NextIndex[i], aer is %+v", rf.me, i, aer)
 					ch <- aer
@@ -646,8 +640,9 @@ func (rf *Raft) sendAEs(curTerm int, commitIndex int) chan AppendEntryReply {
 	return aerChan
 }
 
-func (rf *Raft) checkApplies() {
+func (rf *Raft) checkApplies() bool {
 	// Update CommitedIndex
+	flag := false
 	preCommitedIndex := rf.CommitIndex
 	for i := rf.MaxLogIndex; i >= rf.CommitIndex; i-- {
 		committedNum := 0
@@ -665,9 +660,11 @@ func (rf *Raft) checkApplies() {
 	// check if this log occurs in this term
 	DPrintf("Leader %d, rf.CommitIndex %d, preCommitedIndex %d", rf.me, rf.CommitIndex, preCommitedIndex)
 	if rf.Logs[preCommitedIndex].Term == rf.CurrentTerm {
+		flag = (rf.CommitIndex < preCommitedIndex)
 		rf.CommitIndex = preCommitedIndex
 		rf.persist()
 	}
+	return flag
 }
 
 func (rf *Raft) checkCommitted(aerChan chan AppendEntryReply) {
@@ -710,9 +707,11 @@ Wait_Reply_Loop:
 				DPrintf("Leader %d at i %d appendIndex %d, rf.CommitIndex %d", rf.me, i, appendIndex, rf.CommitIndex)
 
 				// trigger apply manually
-				if success == rf.n-1 && rf.CommitIndex < appendIndex {
-					// rf.apply_timer.Reset(0)
-				}
+				// if success == rf.n-1 &&
+				// 	rf.checkApplies() {
+				// 	DPrintf("Leader %d trigger apply_timer.Reset(0), rf.CommitIndex %d, appendIndex %d", rf.me, rf.CommitIndex, appendIndex)
+				// 	// rf.apply_timer.Reset(0)
+				// }
 			}
 
 			rf.mu.Unlock()
@@ -740,6 +739,7 @@ Wait_Reply_Loop:
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.stopCh <- true
 	rf.stopCh <- true
 	rf.stopCh <- true
 	close(rf.stopCh)
@@ -884,7 +884,7 @@ func (rf *Raft) applyMsg() {
 	for {
 		select {
 		case <-rf.stopCh:
-			DPrintf("Server % d stop applying msgs", rf.me)
+			DPrintf("Server %d stop applying msgs", rf.me)
 			return
 		case <-rf.apply_timer.C:
 			rf.sendMsg()
@@ -897,6 +897,7 @@ func (rf *Raft) sendMsg() {
 	rf.mu.Lock()
 	rf.checkApplies()
 	msgs := make([]ApplyMsg, 0)
+	DPrintf("Leader %d LastApplied %d, FirstUnsavedIndex %d, CommitIndex %d, logs %v", rf.me, rf.LastApplied, rf.FirstUnsavedIndex, rf.CommitIndex, rf.Logs)
 	if rf.LastApplied < rf.FirstUnsavedIndex-1 {
 		msgs = append(msgs, ApplyMsg{
 			CommandValid: false,
