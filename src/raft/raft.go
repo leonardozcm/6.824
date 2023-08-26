@@ -130,7 +130,7 @@ func (rf *Raft) getPersistData() []byte {
 
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	DPrintf("Server %d persist data CurrentTerm %d, VoteFor %d, FirstUnsavedIndex %d, MaxLogIndex %d, logs %v", rf.me, rf.CurrentTerm, rf.VoteFor, rf.FirstUnsavedIndex, rf.MaxLogIndex, rf.Logs)
+	DPrintf("Server %d persist data CurrentTerm %d, VoteFor %d, FirstUnsavedIndex %d, MaxLogIndex %d, CommitIndex %d, logs %v", rf.me, rf.CurrentTerm, rf.VoteFor, rf.FirstUnsavedIndex, rf.MaxLogIndex, rf.CommitIndex, rf.Logs)
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VoteFor)
 	e.Encode(rf.Logs)
@@ -707,11 +707,10 @@ Wait_Reply_Loop:
 				DPrintf("Leader %d at i %d appendIndex %d, rf.CommitIndex %d", rf.me, i, appendIndex, rf.CommitIndex)
 
 				// trigger apply manually
-				// if success == rf.n-1 &&
-				// 	rf.checkApplies() {
-				// 	DPrintf("Leader %d trigger apply_timer.Reset(0), rf.CommitIndex %d, appendIndex %d", rf.me, rf.CommitIndex, appendIndex)
-				// 	// rf.apply_timer.Reset(0)
-				// }
+				if success == rf.n-1 {
+					DPrintf("Leader %d trigger apply_timer.Reset(0), rf.CommitIndex %d, appendIndex %d", rf.me, rf.CommitIndex, appendIndex)
+					// rf.apply_timer.Reset(0)
+				}
 			}
 
 			rf.mu.Unlock()
@@ -773,13 +772,15 @@ func (rf *Raft) holdingElection() {
 
 			// for when you
 			for i := 0; i < rf.n; i++ {
+				maxLogIndex := rf.MaxLogIndex
+				maxLogTerm := rf.Logs[rf.MaxLogIndex].Term
 
 				if i != rf.me {
 
 					go func(i int, ch chan RequestVoteReply) {
 						var rvr RequestVoteReply
-						rf.sendRequestVote(i, &RequestVoteArgs{CurrentTerm, rf.me, rf.MaxLogIndex,
-							rf.Logs[rf.MaxLogIndex].Term}, &rvr)
+						rf.sendRequestVote(i, &RequestVoteArgs{CurrentTerm, rf.me, maxLogIndex,
+							maxLogTerm}, &rvr)
 						voteCh <- rvr
 					}(i, voteCh)
 

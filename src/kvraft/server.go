@@ -69,7 +69,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		kv.mu.Lock()
 		var opReply Op
-		opChan := make(chan Op, 1)
+		opChan := make(chan Op, 3)
 		kv.waitChan[args.CommandId] = opChan
 		kv.mu.Unlock()
 
