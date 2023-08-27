@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"strconv"
 	"strings"
@@ -43,6 +44,7 @@ type KVServer struct {
 	stopCh  chan struct{}
 
 	maxraftstate int // snapshot if log grows this big
+	persister    *raft.Persister
 
 	// Your definitions here.
 	kvMap         map[string]string
@@ -67,7 +69,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		kv.mu.Lock()
 		var opReply Op
-		opChan := make(chan Op, 1)
+		opChan := make(chan Op, 3)
 		kv.waitChan[args.CommandId] = opChan
 		kv.mu.Unlock()
 
@@ -82,10 +84,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				reply.Err = OK
 			}
 			DPrintf("Leader %d Success in %v", kv.me, opReply)
+			return
 		case <-time.After(KvServer_TimeOut):
-			DPrintf("Leader %d Get time out", kv.me)
+			DPrintf("Leader %d Get %v time out", kv.me, args.CommandId)
 			kv.delOpChan(args.CommandId)
 			reply.Err = ErrWrongLeader
+			return
 		}
 	}
 }
@@ -110,23 +114,28 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("leader %d start waiting for %v", kv.me, args)
 		select {
 		case <-opChan:
+			DPrintf("Server %d get opChan %v", kv.me, args.CommandId)
 			kv.delOpChan(args.CommandId)
 			// reply Op success
 			reply.Err = OK
 			DPrintf("Leader %d Success in %v", kv.me, op)
+			return
 		case <-time.After(KvServer_TimeOut):
-			DPrintf("Leader %d PutAppend time out", kv.me)
+			DPrintf("Leader %d PutAppend %v time out", kv.me, args.CommandId)
 			kv.delOpChan(args.CommandId)
 			reply.Err = ErrWrongLeader
+			return
 		}
 	}
 }
 
 func (kv *KVServer) delOpChan(commandId string) {
+	DPrintf("Server %d ready to delete opChan %v", kv.me, commandId)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
 	delete(kv.waitChan, commandId)
+	DPrintf("Server %d delete opChan %v", kv.me, commandId)
 }
 
 func (kv *KVServer) checkDuplicatedRequest(clientId string, commandId int64) bool {
@@ -141,6 +150,12 @@ func (kv *KVServer) processOps(applyMsg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	DPrintf("Server %d get for applyCh %v", kv.me, applyMsg)
+
+	// Check Snapshot
+	if !applyMsg.CommandValid {
+		kv.ReadSnapshot()
+		return
+	}
 
 	clientId, commandId := kv.extractClientID(applyMsg.Command.(Op).CommandId)
 	replyOp := Op{Key: applyMsg.Command.(Op).Key,
@@ -162,6 +177,9 @@ func (kv *KVServer) processOps(applyMsg raft.ApplyMsg) {
 		}
 	}
 
+	// detect if a snapshot should be executed
+	kv.TrySaveSnapshot(applyMsg.CommandIndex)
+
 	if value, ok := kv.kvMap[applyMsg.Command.(Op).Key]; ok {
 		replyOp.Value = value
 	} else {
@@ -171,6 +189,9 @@ func (kv *KVServer) processOps(applyMsg raft.ApplyMsg) {
 	DPrintf("Server %d finshed process op %v", kv.me, replyOp)
 	if opChan, ok := kv.waitChan[applyMsg.Command.(Op).CommandId]; ok {
 		DPrintf("Server %d append %v.", kv.me, replyOp)
+		if len(opChan) > 0 {
+			return
+		}
 		opChan <- replyOp
 		DPrintf("Server %d finish appending %v.", kv.me, replyOp)
 	}
@@ -187,13 +208,58 @@ func (kv *KVServer) ProcessOpsInTime(t *time.Timer) {
 			DPrintf("Server %d exits", kv.me)
 			return
 		case applyMsg = <-kv.applyCh:
-			if !applyMsg.CommandValid {
-				continue
-			}
-			DPrintf("Server %d process op %v in the background", kv.me, applyMsg.Command.(Op))
+			DPrintf("Server %d process op %v in the background", kv.me, applyMsg.Command)
 			kv.processOps(applyMsg)
-			DPrintf("Server %d process op %v in the background done", kv.me, applyMsg.Command.(Op))
+			DPrintf("Server %d process op %v in the background done", kv.me, applyMsg.Command)
 		}
+	}
+}
+
+func (kv *KVServer) TrySaveSnapshot(index int) {
+	// In case the raft logs states have reached the maxraftstate threshold
+	// , we need to save the snapshot and discard the old logs
+	DPrintf("kv.persister.RaftStateSize() vs kv.maxraftstate: %d vs %d ", kv.persister.RaftStateSize(), kv.maxraftstate)
+	if kv.persister.RaftStateSize() >= kv.maxraftstate && kv.maxraftstate != -1 {
+		kv.SaveSnapshot(index)
+	}
+}
+
+func (kv *KVServer) SaveSnapshot(index int) {
+	labgob.Register(Op{})
+	labgob.Register(map[string]string{})
+	labgob.Register(map[string]int64{})
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvMap)
+	e.Encode(kv.lastProcessId)
+	kvdata := w.Bytes()
+	kv.rf.AbandonPersistData(index, kvdata)
+	// kv.persister.SaveStateAndSnapshot(rfdata, kvdata)
+}
+
+func (kv *KVServer) ReadSnapshot() {
+	labgob.Register(Op{})
+	labgob.Register(map[string]string{})
+	labgob.Register(map[string]int64{})
+
+	data := kv.persister.ReadSnapshot()
+
+	var kvMap map[string]string
+	var lastProcessId map[string]int64
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&kvMap) != nil ||
+		d.Decode(&lastProcessId) != nil {
+		DPrintf("Error: Fail to load status from exiting persisted states.")
+	} else {
+		DPrintf("Server %d Status Loaded, kvMap is %v", kv.me, kvMap)
+		kv.kvMap = kvMap
+		kv.lastProcessId = lastProcessId
 	}
 }
 
@@ -237,6 +303,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(map[string]string{})
+	labgob.Register(map[string]int64{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -246,10 +314,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.persister = persister
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.kvMap = map[string]string{}
 	kv.waitChan = map[string]chan Op{}
 	kv.lastProcessId = make(map[string]int64)
+
+	// Read Persisted Data
+	kv.ReadSnapshot()
 
 	// You may need initialization code here.
 	process_timer := time.NewTimer(100 * time.Millisecond)
