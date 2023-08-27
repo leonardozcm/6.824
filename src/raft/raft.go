@@ -96,6 +96,7 @@ type Raft struct {
 	FirstUnsavedIndex int
 	LastIncludedTerm  int
 	MaxLogIndex       int
+	notifyCh          chan struct{}
 }
 
 // return currentTerm and whether this server
@@ -238,7 +239,10 @@ func (rf *Raft) InstallSnapshot(arg *InstallSnapshotArgs, reply *AppendEntryRepl
 	DPrintf("Server %d show InstallSnapshot args %+v to leader %d", rf.me, reply, arg.LeaderId)
 
 	rf.mu.Unlock()
-	// rf.apply_timer.Reset(0)
+	DPrintf("Server %d len(rf.notifyCh) is %d", rf.me, len(rf.notifyCh))
+	if len(rf.notifyCh) == 0 {
+		rf.notifyCh <- struct{}{}
+	}
 	// rf.applyCh <- ApplyMsg{false, nil, -1}
 }
 
@@ -433,6 +437,22 @@ func (rf *Raft) GetMinIndexOfTerm(term int) int {
 	return minIndex
 }
 
+func (rf *Raft) checkOutOfOrder(args *AppendEntryArgs) bool {
+	argsLastIndex := args.PrevLogIndex + len(args.Entries)
+	lastIndex := rf.MaxLogIndex
+	lastTerm := 0
+	if rf.MaxLogIndex < rf.FirstUnsavedIndex {
+		lastTerm = rf.LastIncludedTerm
+	} else {
+		lastTerm = rf.Logs[rf.MaxLogIndex].Term
+	}
+	if argsLastIndex < lastIndex && lastTerm == args.Term {
+		DPrintf("Server %d checkOutOfOrder, argsLastIndex %d, lastIndex %d, lastTerm %d, args.Term %d", rf.me, argsLastIndex, lastIndex, lastTerm, args.Term)
+		return true
+	}
+	return false
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -469,6 +489,15 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	DPrintf("Server %d reqPrevLogIndex %d, rf.FirstUnsavedIndex %d, reqPrevLogTerm %d, rf.LastIncludedTerm %d", rf.me, reqPrevLogIndex, rf.FirstUnsavedIndex, reqPrevLogTerm, rf.LastIncludedTerm)
 	if reqPrevLogIndex == 0 {
 	} else if reqPrevLogIndex == rf.FirstUnsavedIndex-1 {
+		if rf.checkOutOfOrder(args) {
+			reply.Term = rf.CurrentTerm
+			reply.LastIndex = rf.MaxLogIndex
+			reply.Success = false
+			// By the hint from 6.824, we search for the first index of conflicting Term
+			reply.FailedTerm = 0
+			reply.FirstIndexOfFailedTerm = 0
+			return
+		}
 		if reqPrevLogTerm != rf.LastIncludedTerm {
 			reply.Term = rf.CurrentTerm
 			reply.LastIndex = rf.MaxLogIndex
@@ -487,12 +516,23 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.FirstIndexOfFailedTerm = 0
 		return
 	} else {
+		if rf.checkOutOfOrder(args) {
+			reply.Term = rf.CurrentTerm
+			reply.LastIndex = rf.MaxLogIndex
+			reply.Success = false
+			// By the hint from 6.824, we search for the first index of conflicting Term
+			reply.FailedTerm = 0
+			reply.FirstIndexOfFailedTerm = 0
+			return
+		}
+
 		checkedLog, ok := rf.Logs[reqPrevLogIndex]
 		DPrintf("reqPrevLogIndex %d, ok %v, rf.MaxLogIndex %d, reqPrevLogTerm %d, checkedLog.Term %d", reqPrevLogIndex, ok, rf.MaxLogIndex, reqPrevLogTerm, checkedLog.Term)
 		if !ok || (ok && checkedLog.Term != reqPrevLogTerm) {
 			reply.Term = rf.CurrentTerm
 			reply.LastIndex = rf.MaxLogIndex
 			reply.Success = false
+
 			// By the hint from 6.824, we search for the first index of conflicting Term
 			if reqPrevLogIndex != 0 && !ok {
 				reply.FailedTerm = Max(rf.Logs[rf.MaxLogIndex].Term, 1)
@@ -524,8 +564,11 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 
 	if args.LeaderCommit > rf.CommitIndex {
+		DPrintf("Server %d len(rf.notifyCh) is %d, rf.CommitIndex %d, args.LeaderCommit %d", rf.me, len(rf.notifyCh), rf.CommitIndex, args.LeaderCommit)
 		rf.CommitIndex = Min(args.LeaderCommit, rf.MaxLogIndex)
-		// rf.apply_timer.Reset(0)
+		if len(rf.notifyCh) == 0 {
+			rf.notifyCh <- struct{}{}
+		}
 	}
 
 	reply.Success = true
@@ -707,10 +750,15 @@ Wait_Reply_Loop:
 				DPrintf("Leader %d at i %d appendIndex %d, rf.CommitIndex %d", rf.me, i, appendIndex, rf.CommitIndex)
 
 				// trigger apply manually
+
 				if success == rf.n-1 {
 					DPrintf("Leader %d trigger apply_timer.Reset(0), rf.CommitIndex %d, appendIndex %d", rf.me, rf.CommitIndex, appendIndex)
-					// rf.apply_timer.Reset(0)
+					DPrintf("Server %d len(rf.notifyCh) is %d", rf.me, len(rf.notifyCh))
+					if len(rf.notifyCh) == 0 {
+						rf.notifyCh <- struct{}{}
+					}
 				}
+
 			}
 
 			rf.mu.Unlock()
@@ -888,6 +936,12 @@ func (rf *Raft) applyMsg() {
 			DPrintf("Server %d stop applying msgs", rf.me)
 			return
 		case <-rf.apply_timer.C:
+			if len(rf.notifyCh) > 0 {
+				rf.apply_timer.Reset(100 * time.Millisecond)
+				continue
+			}
+			rf.notifyCh <- struct{}{}
+		case <-rf.notifyCh:
 			rf.sendMsg()
 			rf.apply_timer.Reset(100 * time.Millisecond)
 		}
@@ -975,6 +1029,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.LastApplied = rf.FirstUnsavedIndex - 1
+	rf.notifyCh = make(chan struct{}, 100)
 
 	DPrintf(" Server %d init", rf.me)
 
