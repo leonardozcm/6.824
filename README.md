@@ -6,4 +6,6 @@ mit 6.824 distributed system
  - [x] Raft 3B
  - [x] Raft 3C
  - [x] KVRaft 3A
- - [ ] KVRaft 3B
+ - [x] KVRaft 3B
+ - [x] ShardMaster
+ - [ ] ShardKVServer
