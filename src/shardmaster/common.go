@@ -1,5 +1,7 @@
 package shardmaster
 
+import "time"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -19,6 +21,8 @@ package shardmaster
 
 // The number of shards.
 const NShards = 10
+const Clerk_Req_During = 100 * time.Millisecond
+const SMServer_TimeOut = 500 * time.Millisecond
 
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
@@ -35,7 +39,8 @@ const (
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	CommandId string
+	Servers   map[int][]string // new GID -> servers mappings
 }
 
 type JoinReply struct {
@@ -44,7 +49,8 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	CommandId string
+	GIDs      []int
 }
 
 type LeaveReply struct {
@@ -53,8 +59,9 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	CommandId string
+	Shard     int
+	GID       int
 }
 
 type MoveReply struct {
@@ -63,10 +70,17 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	CommandId string
+	Num       int // desired config number
 }
 
 type QueryReply struct {
+	WrongLeader bool
+	Err         Err
+	Config      Config
+}
+
+type CommonReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
